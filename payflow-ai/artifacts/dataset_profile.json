@@ -1,0 +1,27 @@
+{
+  "rows": 250000,
+  "columns": 17,
+  "missing_cells": 0,
+  "duplicate_transactions": 0,
+  "success_rate": 0.950496,
+  "fraud_rate": 0.00192,
+  "columns_list": [
+    "transaction_id",
+    "timestamp",
+    "transaction_type",
+    "merchant_category",
+    "amount_inr",
+    "transaction_status",
+    "sender_age_group",
+    "receiver_age_group",
+    "sender_state",
+    "sender_bank",
+    "receiver_bank",
+    "device_type",
+    "network_type",
+    "fraud_flag",
+    "hour_of_day",
+    "day_of_week",
+    "is_weekend"
+  ]
+}

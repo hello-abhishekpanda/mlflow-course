@@ -1,0 +1,32 @@
+# ============================================
+# PayFlow AI - Core Dependencies
+# ============================================
+
+# MLOps
+mlflow==3.16.0
+
+# Data
+numpy
+pandas
+
+# Visualization
+matplotlib
+
+# Machine Learning
+scikit-learn
+xgboost
+lightgbm
+
+# Configuration
+python-dotenv
+
+# API / Serving
+fastapi
+uvicorn[standard]
+pydantic
+
+# Testing
+pytest
+
+# Dataset
+kaggle

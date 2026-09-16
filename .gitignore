@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# Environment
+.env
+
+# Kaggle
+kaggle.json
+
+# Raw data
+data/raw/*
+!data/raw/.gitkeep
+
+# MLflow local infrastructure
+mlflow.db
+mlartifacts/
+mlruns/
+
+# Local generated artifacts
+artifacts/*
+!artifacts/.gitkeep
+
+# macOS
+.DS_Store
