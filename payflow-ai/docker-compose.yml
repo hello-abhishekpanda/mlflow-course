@@ -1,0 +1,408 @@
+name: payflow-mlops
+
+
+services:
+
+  # =======================================================
+  # POSTGRESQL
+  #
+  # MLflow backend metadata store.
+  #
+  # Stores:
+  #   - experiments
+  #   - runs
+  #   - metrics
+  #   - parameters
+  #   - tags
+  #   - registered models
+  #   - versions
+  #   - aliases
+  # =======================================================
+
+  postgres:
+
+    image: postgres:16-alpine
+
+    container_name: payflow-postgres
+
+
+    environment:
+
+      POSTGRES_DB: ${POSTGRES_DB}
+
+      POSTGRES_USER: ${POSTGRES_USER}
+
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+
+    ports:
+
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+
+
+    volumes:
+
+      - postgres-data:/var/lib/postgresql/data
+
+
+    healthcheck:
+
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
+
+      interval: 5s
+
+      timeout: 5s
+
+      retries: 10
+
+
+    networks:
+
+      - payflow-network
+
+
+    restart: unless-stopped
+
+
+
+  # =======================================================
+  # MINIO
+  #
+  # S3-compatible MLflow artifact store.
+  #
+  # 9000 -> S3-compatible API
+  # 9001 -> Web console
+  # =======================================================
+
+  minio:
+
+    image: quay.io/minio/minio:latest
+
+    container_name: payflow-minio
+
+
+    command:
+      [
+        "server",
+        "/data",
+        "--console-address",
+        ":9001"
+      ]
+
+
+    environment:
+
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+
+    ports:
+
+      - "${MINIO_API_PORT:-9000}:9000"
+
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+
+
+    volumes:
+
+      - minio-data:/data
+
+
+    networks:
+
+      - payflow-network
+
+
+    restart: unless-stopped
+
+
+
+  # =======================================================
+  # MINIO INITIALIZER
+  #
+  # Creates:
+  #
+  #     s3://mlflow
+  #
+  # once MinIO becomes available.
+  # =======================================================
+
+  minio-init:
+
+    image: quay.io/minio/mc:latest
+
+    container_name: payflow-minio-init
+
+
+    depends_on:
+
+      - minio
+
+
+    environment:
+
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+      MLFLOW_BUCKET: ${MLFLOW_BUCKET}
+
+
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Waiting for MinIO..."
+
+        until /usr/bin/mc alias set \
+          payflow \
+          http://minio:9000 \
+          "$${MINIO_ROOT_USER}" \
+          "$${MINIO_ROOT_PASSWORD}"
+        do
+          echo "MinIO not ready yet..."
+          sleep 2
+        done
+
+        echo "MinIO is ready."
+
+        /usr/bin/mc mb \
+          --ignore-existing \
+          "payflow/$${MLFLOW_BUCKET}"
+
+        /usr/bin/mc anonymous set \
+          none \
+          "payflow/$${MLFLOW_BUCKET}"
+
+        echo "MLflow artifact bucket is ready."
+
+
+    networks:
+
+      - payflow-network
+
+
+    restart: "no"
+
+
+
+  # =======================================================
+  # MLFLOW
+  #
+  # IMPORTANT:
+  #
+  # Build context MUST be:
+  #
+  #     .
+  #
+  # Because docker-compose.yml lives at:
+  #
+  #     payflow-ai/docker-compose.yml
+  #
+  # Dockerfile therefore resolves to:
+  #
+  #     payflow-ai/docker/mlflow/Dockerfile
+  # =======================================================
+
+  mlflow:
+
+    build:
+
+      context: .
+
+      dockerfile: docker/mlflow/Dockerfile
+
+
+    container_name: payflow-mlflow
+
+
+    depends_on:
+
+      postgres:
+
+        condition: service_healthy
+
+
+      minio-init:
+
+        condition: service_completed_successfully
+
+
+    environment:
+
+      # PostgreSQL metadata backend.
+      MLFLOW_BACKEND_STORE_URI:
+        postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+
+      # MinIO endpoint visible from inside Docker.
+      MLFLOW_S3_ENDPOINT_URL:
+        http://minio:9000
+
+
+      AWS_ACCESS_KEY_ID:
+        ${MINIO_ROOT_USER}
+
+
+      AWS_SECRET_ACCESS_KEY:
+        ${MINIO_ROOT_PASSWORD}
+
+
+      AWS_DEFAULT_REGION:
+        us-east-1
+
+
+      MLFLOW_BUCKET:
+        ${MLFLOW_BUCKET}
+
+
+    command:
+      - /bin/sh
+      - -c
+      - |
+        mlflow server \
+          --host 0.0.0.0 \
+          --port 5000 \
+          --backend-store-uri "$${MLFLOW_BACKEND_STORE_URI}" \
+          --artifacts-destination "s3://$${MLFLOW_BUCKET}" \
+          --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:5000" \
+          --cors-allowed-origins "http://localhost:5050,http://127.0.0.1:5050,http://localhost:8001,http://127.0.0.1:8001"
+
+
+    ports:
+
+      - "${MLFLOW_HOST_PORT:-5050}:5000"
+
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"
+        ]
+
+      interval: 10s
+
+      timeout: 5s
+
+      retries: 12
+
+
+    networks:
+
+      - payflow-network
+
+
+    restart: unless-stopped
+
+
+
+  # =======================================================
+  # FASTAPI
+  #
+  # Build context is ALSO:
+  #
+  #     .
+  #
+  # This allows Dockerfile to access:
+  #
+  #     src/
+  #     docker/fastapi/requirements.txt
+  # =======================================================
+
+  fastapi:
+
+    build:
+
+      context: .
+
+      dockerfile: docker/fastapi/Dockerfile
+
+
+    container_name: payflow-fastapi
+
+
+    depends_on:
+
+      mlflow:
+
+        condition: service_healthy
+
+
+    environment:
+
+      # Containers talk using service names.
+      #
+      # Never use localhost:5050 here.
+      MLFLOW_TRACKING_URI:
+        http://mlflow:5000
+
+
+      PAYFLOW_REGISTERED_MODEL_NAME:
+        payflow-payment-success
+
+
+      PAYFLOW_MODEL_ALIAS:
+        champion
+
+
+    ports:
+
+      - "${FASTAPI_HOST_PORT:-8001}:8000"
+
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"
+        ]
+
+      interval: 10s
+
+      timeout: 5s
+
+      retries: 12
+
+
+    networks:
+
+      - payflow-network
+
+
+    restart: unless-stopped
+
+
+
+# =========================================================
+# PERSISTENT VOLUMES
+# =========================================================
+
+volumes:
+
+  postgres-data:
+
+  minio-data:
+
+
+
+# =========================================================
+# PRIVATE DOCKER NETWORK
+# =========================================================
+
+networks:
+
+  payflow-network:
+
+    name: payflow-network

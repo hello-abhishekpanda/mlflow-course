@@ -1,0 +1,60 @@
+{
+  "policy_version": "v2",
+  "candidate_run_name": "xgboost-v1",
+  "candidate_run_id": "7c79a89925ce4f42b10df8ac100405d4",
+  "candidate_model_id": "m-92e75257311742e78ab4b165924b1663",
+  "candidate_model_uri": "models:/m-92e75257311742e78ab4b165924b1663",
+  "baseline_run_name": "dummy-baseline",
+  "baseline_run_id": "a66d8e0d65e04b67b544d475ee415e8c",
+  "baseline_model_id": "m-e040ffabe22044cca4f5172c0a096f24",
+  "baseline_model_uri": "models:/m-e040ffabe22044cca4f5172c0a096f24",
+  "optimized_on": "validation",
+  "target_event": "FAILED",
+  "target_label": 0,
+  "objective": "maximize_failed_f1_subject_to_accuracy_policy",
+  "selected_threshold": 0.07434343434343434,
+  "production_constraints": {
+    "baseline_validation_accuracy": 0.9514933333333333,
+    "max_accuracy_drop": 0.05,
+    "minimum_validation_accuracy": 0.9014933333333333,
+    "minimum_failed_precision": 0.0
+  },
+  "default_threshold_metrics": {
+    "threshold": 0.5,
+    "accuracy": 0.9514933333333333,
+    "failed_precision": 0.0,
+    "failed_recall": 0.0,
+    "failed_f1": 0.0,
+    "failed_roc_auc": 0.5082511194000703,
+    "failed_pr_auc": 0.05000886936411767,
+    "predicted_failure_rate": 0.0,
+    "actual_failure_rate": 0.04850666666666666
+  },
+  "baseline_validation_metrics": {
+    "threshold": 0.5,
+    "accuracy": 0.9514933333333333,
+    "failed_precision": 0.0,
+    "failed_recall": 0.0,
+    "failed_f1": 0.0,
+    "failed_roc_auc": 0.5,
+    "failed_pr_auc": 0.04850666666666666,
+    "predicted_failure_rate": 0.0,
+    "actual_failure_rate": 0.04850666666666666
+  },
+  "validation_metrics": {
+    "accuracy": 0.9112,
+    "failed_precision": 0.05216360403082395,
+    "failed_recall": 0.04837822979659153,
+    "failed_f1": 0.05019965772960639,
+    "failed_roc_auc": 0.5082511194000703,
+    "failed_pr_auc": 0.05000886936411767,
+    "predicted_failure_rate": 0.04498666666666667,
+    "actual_failure_rate": 0.04850666666666666
+  },
+  "threshold_search": {
+    "minimum": 0.01,
+    "maximum": 0.99,
+    "count": 199,
+    "eligible_count": 21
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "candidate_model_id": "m-92e75257311742e78ab4b165924b1663",
+  "candidate_model_uri": "models:/m-92e75257311742e78ab4b165924b1663",
+  "selected_failure_threshold": 0.07434343434343434,
+  "threshold_policy_version": "v2",
+  "candidate_thresholded_metrics": {
+    "threshold": 0.07434343434343434,
+    "accuracy": 0.9112266666666666,
+    "failed_precision": 0.05485232067510549,
+    "failed_recall": 0.04913606911447084,
+    "failed_f1": 0.05183708345200797,
+    "failed_roc_auc": 0.509292223688981,
+    "failed_pr_auc": 0.05126159012742939,
+    "predicted_failure_rate": 0.04424,
+    "actual_failure_rate": 0.04938666666666667
+  },
+  "candidate_default_metrics": {
+    "threshold": 0.5,
+    "accuracy": 0.9506133333333333,
+    "failed_precision": 0.0,
+    "failed_recall": 0.0,
+    "failed_f1": 0.0,
+    "failed_roc_auc": 0.509292223688981,
+    "failed_pr_auc": 0.05126159012742939,
+    "predicted_failure_rate": 0.0,
+    "actual_failure_rate": 0.04938666666666667
+  },
+  "baseline_metrics": {
+    "threshold": 0.5,
+    "accuracy": 0.9506133333333333,
+    "failed_precision": 0.0,
+    "failed_recall": 0.0,
+    "failed_f1": 0.0,
+    "failed_roc_auc": 0.5,
+    "failed_pr_auc": 0.04938666666666667,
+    "predicted_failure_rate": 0.0,
+    "actual_failure_rate": 0.04938666666666667
+  },
+  "gate_checks": {
+    "failed_f1_improved_over_default": true,
+    "failed_recall_improved_over_default": true,
+    "failed_precision_nonzero": true,
+    "roc_auc_better_than_baseline": true,
+    "accuracy_within_policy": true
+  },
+  "quality_gate_passed": true,
+  "registry_eligible": true
+}

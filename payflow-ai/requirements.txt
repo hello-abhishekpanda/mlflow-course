@@ -19,6 +19,7 @@ lightgbm
 
 # Configuration
 python-dotenv
+httpx
 
 # API / Serving
 fastapi

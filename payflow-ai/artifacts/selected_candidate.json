@@ -1,0 +1,21 @@
+{
+  "experiment_name": "payflow-payment-success",
+  "selection_dataset": "validation",
+  "selection_metric": "val_failed_f1",
+  "candidate": {
+    "run_name": "xgboost-v1",
+    "run_id": "7c79a89925ce4f42b10df8ac100405d4",
+    "model_type": "XGBClassifier",
+    "model_id": "m-92e75257311742e78ab4b165924b1663",
+    "model_uri": "models:/m-92e75257311742e78ab4b165924b1663",
+    "val_failed_f1": 0.0,
+    "val_failed_pr_auc": 0.05000886936411767,
+    "val_roc_auc": 0.5082511194000703
+  },
+  "baseline": {
+    "run_name": "dummy-baseline",
+    "run_id": "a66d8e0d65e04b67b544d475ee415e8c",
+    "model_id": "m-e040ffabe22044cca4f5172c0a096f24",
+    "model_uri": "models:/m-e040ffabe22044cca4f5172c0a096f24"
+  }
+}
