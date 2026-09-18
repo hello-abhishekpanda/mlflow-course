@@ -55,9 +55,10 @@ class TransactionFeatures(
     )
 
 
-    amount_inr: float = Field(
-        ge=0.0,
-    )
+
+    amount_inr: int = Field(
+    ge=0,
+)
 
 
     # -----------------------------------------------------

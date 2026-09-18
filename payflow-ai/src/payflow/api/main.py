@@ -114,7 +114,7 @@ settings = (
 
 configure_logging()
 
-configure_mlflow_tracing()
+# configure_mlflow_tracing()
 
 
 # =========================================================
@@ -167,7 +167,6 @@ model_service = (
 #
 # We do NOT download the ML model for every request.
 # =========================================================
-
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
@@ -182,21 +181,57 @@ async def lifespan(
     )
 
 
+    # =====================================================
+    # CONFIGURE MLFLOW TRACING
+    #
+    # This intentionally happens during application startup,
+    # not during Python import.
+    #
+    # Local:
+    #     http://127.0.0.1:5050
+    #
+    # Docker:
+    #     http://mlflow:5000
+    # =====================================================
+
     try:
 
+        configure_mlflow_tracing()
+
+        logger.info(
+            "mlflow.tracing_configured",
+            extra={
+                "service":
+                    "payflow-fastapi",
+            },
+        )
+
+
+    except Exception:
+
         # -------------------------------------------------
-        # Resolve and load:
+        # Tracing failure should be visible, but it should
+        # not prevent Python from importing the application.
         #
-        # models:/payflow-payment-success@champion
+        # For now we allow the API startup to continue.
         # -------------------------------------------------
+
+        logger.exception(
+            "mlflow.tracing_configuration_failed",
+            extra={
+                "service":
+                    "payflow-fastapi",
+            },
+        )
+
+
+    try:
 
         model_service.load()
-
 
         metadata = (
             model_service.metadata()
         )
-
 
         logger.info(
             "model.loaded",
@@ -234,18 +269,6 @@ async def lifespan(
 
     except Exception:
 
-        # -------------------------------------------------
-        # Keep the API process alive.
-        #
-        # /health
-        #     → still returns alive
-        #
-        # /ready
-        #     → returns 503
-        #
-        # This is the correct liveness/readiness split.
-        # -------------------------------------------------
-
         logger.exception(
             "model.load_failed",
             extra={
@@ -254,10 +277,6 @@ async def lifespan(
             },
         )
 
-
-    # -----------------------------------------------------
-    # FastAPI begins serving HTTP requests here.
-    # -----------------------------------------------------
 
     yield
 
@@ -269,7 +288,6 @@ async def lifespan(
                 "payflow-fastapi",
         },
     )
-
 
 # =========================================================
 # 6. FASTAPI APPLICATION

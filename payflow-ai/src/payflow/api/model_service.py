@@ -36,7 +36,7 @@ from payflow.models.thresholding import (
 #   Governance
 #   Registry
 #   @champion
-#   failure threshold
+#   Version-specific failure threshold
 #
 # PART 6
 #   FastAPI production inference
@@ -47,18 +47,20 @@ from payflow.models.thresholding import (
 #   MinIO
 #
 # PART 8
-#   Nested MLflow inference tracing
+#   MLflow tracing
+#   Nested inference spans
+#   Runtime model-contract enforcement
 #
 #
-# Runtime trace:
+# Trace hierarchy:
 #
-# payflow.predict                  ← main.py
+# payflow.predict                     ← main.py
 # │
-# ├── mlflow.signature_validation ← this file
+# ├── mlflow.signature_validation     ← this file
 # │
-# ├── sklearn.predict_proba       ← this file
+# ├── sklearn.predict_proba           ← this file
 # │
-# └── failure.threshold           ← this file
+# └── failure.threshold               ← this file
 #
 # =========================================================
 
@@ -73,7 +75,7 @@ class ModelNotReadyError(
 ):
     """
     Raised when prediction is attempted before the
-    production model has been loaded.
+    production model has been loaded successfully.
     """
 
 
@@ -81,8 +83,8 @@ class ModelContractError(
     ValueError
 ):
     """
-    Raised when incoming inference data does not satisfy
-    the MLflow model signature.
+    Raised when inference input does not satisfy the
+    production model contract.
     """
 
 
@@ -90,8 +92,8 @@ class ModelGovernanceError(
     RuntimeError
 ):
     """
-    Raised when the Registry says the model should not be
-    used for production inference.
+    Raised when Registry metadata says that a model must
+    not be used for production inference.
     """
 
 
@@ -102,23 +104,27 @@ class ModelGovernanceError(
 
 class PayFlowModelService:
     """
-    Owns the currently loaded production model.
+    Owns the currently loaded production PayFlow model.
 
     Responsibilities:
 
         1. Resolve @champion from MLflow Registry
-        2. Verify governance metadata
-        3. Read model-specific failure threshold
+        2. Verify model governance tags
+        3. Read version-specific failure threshold
         4. Load sklearn Pipeline
-        5. Validate inference schema
-        6. Calculate probabilities
-        7. Apply threshold policy
-        8. Emit nested MLflow inference spans
+        5. Load MLflow model signature
+        6. Build exact inference dataframe
+        7. Normalize runtime dtypes
+        8. Validate MLflow signature
+        9. Calculate P(FAILED) / P(SUCCESS)
+       10. Apply failure threshold
+       11. Return production prediction
+       12. Emit nested MLflow spans
     """
 
 
     # =====================================================
-    # INITIALIZATION
+    # 3. INITIALIZATION
     # =====================================================
 
     def __init__(
@@ -132,14 +138,12 @@ class PayFlowModelService:
 
 
         # -------------------------------------------------
-        # Configure MLflow before creating the Registry
-        # client.
+        # MLflow must be configured before Registry access.
         # -------------------------------------------------
 
         mlflow.set_tracking_uri(
             settings.tracking_uri
         )
-
 
         mlflow.set_registry_uri(
             settings.tracking_uri
@@ -159,44 +163,35 @@ class PayFlowModelService:
 
 
         # -------------------------------------------------
-        # Runtime state.
-        #
-        # These values are populated by load().
+        # Runtime model state
         # -------------------------------------------------
 
         self.model: Any | None = (
             None
         )
 
-
         self.model_info: Any | None = (
             None
         )
 
-
         self.model_version: str | None = (
             None
         )
-
 
         self.model_tags: dict[
             str,
             str,
         ] = {}
 
-
         self.failure_threshold: float | None = (
             None
         )
-
 
         self.loaded_at_utc: str | None = (
             None
         )
 
-
         self.ready = False
-
 
         self.load_error: str | None = (
             None
@@ -204,24 +199,21 @@ class PayFlowModelService:
 
 
     # =====================================================
-    # 3. LOAD PRODUCTION MODEL
+    # 4. LOAD PRODUCTION MODEL
     # =====================================================
 
     def load(
         self,
     ) -> None:
         """
-        Resolve the Registry alias and load the approved
-        production model exactly once during API startup.
+        Resolve and load the approved production model.
 
         This method does NOT train a model.
 
-        It loads:
+        Production URI:
 
             models:/payflow-payment-success@champion
         """
-
-        # Reset readiness while initialization is running.
 
         self.ready = False
 
@@ -231,18 +223,16 @@ class PayFlowModelService:
         try:
 
             # =============================================
-            # 3.1 RESOLVE @champion
+            # 4.1 RESOLVE @champion
             # =============================================
 
             model_version = (
                 self.client
                 .get_model_version_by_alias(
-
                     name=(
                         self.settings
                         .registered_model_name
                     ),
-
                     alias=(
                         self.settings
                         .model_alias
@@ -257,10 +247,7 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.2 READ MODEL VERSION TAGS
-            #
-            # These governance tags were created earlier
-            # during the quality-gate / Registry workflow.
+            # 4.2 MODEL VERSION TAGS
             # =============================================
 
             self.model_tags = dict(
@@ -284,14 +271,9 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.3 GOVERNANCE CHECK
+            # 4.3 GOVERNANCE ENFORCEMENT
             #
-            # @champion alone is NOT sufficient.
-            #
-            # The model must still prove:
-            #
-            #   quality_gate = PASSED
-            #   registry_eligible = true
+            # @champion alone is not sufficient.
             # =============================================
 
             if quality_gate != "PASSED":
@@ -316,15 +298,11 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.4 READ VERSION-SPECIFIC FAILURE THRESHOLD
+            # 4.4 FAILURE THRESHOLD
             #
-            # IMPORTANT:
+            # Never hard-code the production threshold.
             #
-            # Do NOT hard-code:
-            #
-            #     0.074343...
-            #
-            # Threshold belongs to the registered version.
+            # It belongs to the registered model version.
             # =============================================
 
             threshold_text = (
@@ -342,12 +320,27 @@ class PayFlowModelService:
                 )
 
 
-            threshold = float(
-                threshold_text
-            )
+            try:
+
+                threshold = float(
+                    threshold_text
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ) as error:
+
+                raise ModelGovernanceError(
+                    "failure_threshold is not numeric."
+                ) from error
 
 
-            if not 0.0 < threshold < 1.0:
+            if not (
+                0.0
+                < threshold
+                < 1.0
+            ):
 
                 raise ModelGovernanceError(
                     "failure_threshold must be between "
@@ -361,11 +354,7 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.5 BUILD ALIAS-BASED MODEL URI
-            #
-            # Example:
-            #
-            # models:/payflow-payment-success@champion
+            # 4.5 MODEL URI
             # =============================================
 
             model_uri = (
@@ -375,13 +364,15 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.6 LOAD SKLEARN PIPELINE
+            # 4.6 LOAD SKLEARN PIPELINE
             #
-            # MLflow downloads model artifacts and rebuilds:
+            # Artifacts:
             #
-            # preprocessing
-            #     +
-            # classifier
+            # MLflow
+            #   ↓
+            # MinIO
+            #   ↓
+            # sklearn Pipeline
             # =============================================
 
             self.model = (
@@ -393,10 +384,9 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.7 LOAD MLFLOW MODEL METADATA
+            # 4.7 LOAD MLFLOW MODELINFO
             #
-            # ModelInfo contains the logged signature used
-            # for runtime schema validation.
+            # Contains the production model signature.
             # =============================================
 
             self.model_info = (
@@ -408,7 +398,7 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.8 RECORD MODEL LOAD TIME
+            # 4.8 RECORD LOAD TIME
             # =============================================
 
             self.loaded_at_utc = (
@@ -420,7 +410,7 @@ class PayFlowModelService:
 
 
             # =============================================
-            # 3.9 MODEL IS READY
+            # 4.9 SERVICE IS READY
             # =============================================
 
             self.ready = True
@@ -430,31 +420,30 @@ class PayFlowModelService:
 
             self.ready = False
 
-            self.load_error = (
-                str(
-                    error
-                )
+            self.load_error = str(
+                error
             )
 
             raise
 
 
     # =====================================================
-    # 4. REQUIRE READY
+    # 5. REQUIRE READY
     # =====================================================
 
     def require_ready(
         self,
     ) -> None:
         """
-        Prevent predictions while model initialization has
-        not completed successfully.
+        Prevent prediction traffic until startup model
+        initialization has completed successfully.
         """
 
         if (
             not self.ready
             or self.model is None
             or self.failure_threshold is None
+            or self.model_version is None
         ):
 
             raise ModelNotReadyError(
@@ -465,7 +454,130 @@ class PayFlowModelService:
 
 
     # =====================================================
-    # 5. BUILD + VALIDATE INFERENCE DATAFRAME
+    # 6. NORMALIZE INTEGER CONTRACT COLUMN
+    # =====================================================
+
+    @staticmethod
+    def _normalize_int64_column(
+        frame: pd.DataFrame,
+        column_name: str,
+    ) -> None:
+        """
+        Normalize one inference column to int64 safely.
+
+        Accepted examples:
+
+            1250
+            1250.0
+            "1250"
+
+        Rejected examples:
+
+            1250.75
+            "abc"
+            null
+
+        This matters because the current registered model
+        signature expects MLflow `long`, which maps to
+        pandas / NumPy int64.
+
+        We intentionally DO NOT truncate decimal amounts.
+        """
+
+        try:
+
+            numeric = pd.to_numeric(
+                frame[
+                    column_name
+                ],
+                errors="raise",
+            )
+
+
+        except (
+            TypeError,
+            ValueError,
+        ) as error:
+
+            raise ModelContractError(
+                f"{column_name} must be an integer-compatible "
+                "numeric value."
+            ) from error
+
+
+        # -------------------------------------------------
+        # Missing values are invalid for required features.
+        # -------------------------------------------------
+
+        if numeric.isna().any():
+
+            raise ModelContractError(
+                f"{column_name} contains a null value."
+            )
+
+
+        # -------------------------------------------------
+        # The production signature expects int64.
+        #
+        # A value such as 1250.75 must NOT silently become
+        # 1250.
+        # -------------------------------------------------
+
+        non_integral_mask = (
+
+            numeric.astype(
+                "float64"
+            )
+
+            % 1
+
+            != 0
+        )
+
+
+        if non_integral_mask.any():
+
+            invalid_values = (
+                numeric[
+                    non_integral_mask
+                ]
+                .tolist()
+            )
+
+
+            raise ModelContractError(
+                f"{column_name} must contain whole-number "
+                f"values because the production MLflow "
+                f"signature expects long/int64. "
+                f"Invalid values: {invalid_values}"
+            )
+
+
+        try:
+
+            frame[
+                column_name
+            ] = (
+                numeric.astype(
+                    "int64"
+                )
+            )
+
+
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+        ) as error:
+
+            raise ModelContractError(
+                f"{column_name} could not be converted "
+                "safely to int64."
+            ) from error
+
+
+    # =====================================================
+    # 7. BUILD + VALIDATE INFERENCE DATAFRAME
     # =====================================================
 
     def _build_frame(
@@ -475,12 +587,41 @@ class PayFlowModelService:
         ],
     ) -> pd.DataFrame:
         """
-        Convert API records into the exact feature layout
-        expected by the PayFlow sklearn Pipeline.
+        Convert incoming API records into the exact runtime
+        dataframe expected by the production pipeline.
 
-        This method also validates the dataframe against
-        the MLflow model signature.
+        Steps:
+
+            records
+              ↓
+            DataFrame
+              ↓
+            required-column validation
+              ↓
+            extra-column validation
+              ↓
+            FEATURE_COLUMNS ordering
+              ↓
+            dtype normalization
+              ↓
+            MLflow signature validation
         """
+
+        # -------------------------------------------------
+        # Empty inference requests should never reach the
+        # model.
+        # -------------------------------------------------
+
+        if not records:
+
+            raise ModelContractError(
+                "At least one inference record is required."
+            )
+
+
+        # =============================================
+        # 7.1 BUILD DATAFRAME
+        # =============================================
 
         frame = (
             pd.DataFrame
@@ -490,9 +631,9 @@ class PayFlowModelService:
         )
 
 
-        # -------------------------------------------------
-        # 5.1 REQUIRED COLUMN VALIDATION
-        # -------------------------------------------------
+        # =============================================
+        # 7.2 REQUIRED FEATURES
+        # =============================================
 
         missing_columns = (
 
@@ -514,12 +655,9 @@ class PayFlowModelService:
             )
 
 
-        # -------------------------------------------------
-        # 5.2 REJECT UNSUPPORTED FIELDS
-        #
-        # Prevent accidental schema drift from entering the
-        # model pipeline.
-        # -------------------------------------------------
+        # =============================================
+        # 7.3 REJECT EXTRA FEATURES
+        # =============================================
 
         extra_columns = (
 
@@ -541,9 +679,9 @@ class PayFlowModelService:
             )
 
 
-        # -------------------------------------------------
-        # 5.3 ENFORCE TRAINING COLUMN ORDER
-        # -------------------------------------------------
+        # =============================================
+        # 7.4 ENFORCE TRAINING COLUMN ORDER
+        # =============================================
 
         frame = (
             frame[
@@ -553,23 +691,102 @@ class PayFlowModelService:
         )
 
 
-        # -------------------------------------------------
-        # 5.4 MLFLOW SIGNATURE VALIDATION SPAN
+        # =============================================
+        # 7.5 NORMALIZE NUMERIC DTYPES
         #
-        # When this method is called inside:
+        # Current MLflow signature expects:
+        #
+        # amount_inr
+        #     long / int64
+        #
+        # hour_of_day
+        #     long / int64
+        #
+        # is_weekend
+        #     long / int64
+        #
+        # JSON/Pydantic/Pandas can otherwise create a
+        # float64 or object dtype.
+        # =============================================
+
+        self._normalize_int64_column(
+            frame,
+            "amount_inr",
+        )
+
+        self._normalize_int64_column(
+            frame,
+            "hour_of_day",
+        )
+
+        self._normalize_int64_column(
+            frame,
+            "is_weekend",
+        )
+
+
+        # =============================================
+        # 7.6 NORMALIZE CATEGORICAL FEATURES
+        #
+        # The model signature expects strings for these
+        # columns.
+        # =============================================
+
+        categorical_columns = [
+
+            column
+
+            for column
+            in FEATURE_COLUMNS
+
+            if column not in {
+                "amount_inr",
+                "hour_of_day",
+                "is_weekend",
+            }
+        ]
+
+
+        for column_name in categorical_columns:
+
+            if frame[
+                column_name
+            ].isna().any():
+
+                raise ModelContractError(
+                    f"{column_name} contains a null value."
+                )
+
+
+            frame[
+                column_name
+            ] = (
+                frame[
+                    column_name
+                ]
+                .astype(
+                    "string"
+                )
+            )
+
+
+        # =============================================
+        # 7.7 MLFLOW SIGNATURE VALIDATION SPAN
+        #
+        # When called from:
         #
         #     payflow.predict
         #
-        # this automatically becomes its child span.
-        #
-        # Trace:
+        # MLflow automatically nests this span:
         #
         # payflow.predict
         #   └── mlflow.signature_validation
-        # -------------------------------------------------
+        # =============================================
 
         with mlflow.start_span(
-            name="mlflow.signature_validation"
+            name=(
+                "mlflow.signature_validation"
+            )
         ) as span:
 
             span.set_attributes(
@@ -582,6 +799,27 @@ class PayFlowModelService:
                     "payflow.record_count":
                         len(
                             frame
+                        ),
+
+                    "payflow.amount_dtype":
+                        str(
+                            frame[
+                                "amount_inr"
+                            ].dtype
+                        ),
+
+                    "payflow.hour_dtype":
+                        str(
+                            frame[
+                                "hour_of_day"
+                            ].dtype
+                        ),
+
+                    "payflow.weekend_dtype":
+                        str(
+                            frame[
+                                "is_weekend"
+                            ].dtype
                         ),
                 }
             )
@@ -614,6 +852,9 @@ class PayFlowModelService:
                         {
                             "schema_valid":
                                 True,
+
+                            "signature_present":
+                                True,
                         }
                     )
 
@@ -624,6 +865,9 @@ class PayFlowModelService:
                         {
                             "schema_valid":
                                 False,
+
+                            "signature_present":
+                                True,
                         }
                     )
 
@@ -637,10 +881,10 @@ class PayFlowModelService:
 
             else:
 
-                # Model has no runtime input signature.
-                #
-                # We do not fail here because the original
-                # service behavior allowed this condition.
+                # -----------------------------------------
+                # Preserve previous API behavior if an old
+                # model exists without a logged signature.
+                # -----------------------------------------
 
                 span.set_outputs(
                     {
@@ -657,7 +901,7 @@ class PayFlowModelService:
 
 
     # =====================================================
-    # 6. PREDICT MANY RECORDS
+    # 8. PREDICT RECORDS
     # =====================================================
 
     def predict_records(
@@ -671,34 +915,32 @@ class PayFlowModelService:
         """
         Score one or more PayFlow transactions.
 
-        IMPORTANT:
+        Important:
 
-        We use probabilities + the Registry threshold.
+        We use:
 
-        We do NOT rely on:
+            predict_proba()
+
+        plus the Registry threshold.
+
+        We do NOT depend on:
 
             model.predict()
 
-        because the production decision threshold may not
-        be the classifier's default 0.50 threshold.
+        because the governed production threshold is not
+        necessarily 0.50.
         """
-
-        # -------------------------------------------------
-        # Confirm startup completed successfully.
-        # -------------------------------------------------
 
         self.require_ready()
 
 
-        # -------------------------------------------------
-        # Build exact inference dataframe.
+        # =============================================
+        # 8.1 BUILD + VALIDATE DATAFRAME
         #
-        # This also creates:
+        # Creates child span:
         #
-        #     mlflow.signature_validation
-        #
-        # when a parent MLflow trace exists.
-        # -------------------------------------------------
+        # mlflow.signature_validation
+        # =============================================
 
         frame = (
             self._build_frame(
@@ -712,12 +954,10 @@ class PayFlowModelService:
             is not None
         )
 
-
         assert (
             self.failure_threshold
             is not None
         )
-
 
         assert (
             self.model_version
@@ -725,29 +965,19 @@ class PayFlowModelService:
         )
 
 
-        # =================================================
-        # 6.1 MODEL PROBABILITY INFERENCE SPAN
+        # =============================================
+        # 8.2 PROBABILITY INFERENCE
         #
-        # Parent trace:
+        # Trace:
         #
         # payflow.predict
-        #
-        # Child:
-        #
-        # sklearn.predict_proba
-        #
-        #
-        # Existing helper functions are intentionally kept.
-        #
-        # They determine:
-        #
-        #     P(FAILED)  → class 0
-        #     P(SUCCESS) → class 1
-        #
-        # =================================================
+        #   └── sklearn.predict_proba
+        # =============================================
 
         with mlflow.start_span(
-            name="sklearn.predict_proba"
+            name=(
+                "sklearn.predict_proba"
+            )
         ) as span:
 
             span.set_attributes(
@@ -779,11 +1009,9 @@ class PayFlowModelService:
             )
 
 
-            # =============================================
-            # P(FAILED)
-            #
-            # FAILED = class 0
-            # =============================================
+            # -----------------------------------------
+            # FAILED is class 0.
+            # -----------------------------------------
 
             failure_probabilities = (
                 get_class_probability(
@@ -801,11 +1029,9 @@ class PayFlowModelService:
             )
 
 
-            # =============================================
-            # P(SUCCESS)
-            #
-            # SUCCESS = class 1
-            # =============================================
+            # -----------------------------------------
+            # SUCCESS is class 1.
+            # -----------------------------------------
 
             success_probabilities = (
                 get_class_probability(
@@ -823,12 +1049,42 @@ class PayFlowModelService:
             )
 
 
-            # -------------------------------------------------
-            # Avoid logging every probability for large batches.
+            if (
+                len(
+                    failure_probabilities
+                )
+                != len(
+                    frame
+                )
+            ):
+
+                raise RuntimeError(
+                    "Failure probability output length "
+                    "does not match input record count."
+                )
+
+
+            if (
+                len(
+                    success_probabilities
+                )
+                != len(
+                    frame
+                )
+            ):
+
+                raise RuntimeError(
+                    "Success probability output length "
+                    "does not match input record count."
+                )
+
+
+            # -----------------------------------------
+            # Do not log all per-payment probabilities
+            # for large batches.
             #
-            # Only operational summary information goes into the
-            # span.
-            # -------------------------------------------------
+            # Log only operational summaries.
+            # -----------------------------------------
 
             span.set_outputs(
                 {
@@ -868,17 +1124,8 @@ class PayFlowModelService:
             )
 
 
-        # =================================================
-        # 6.2 VERSION-SPECIFIC THRESHOLD SPAN
-        #
-        # Parent:
-        #
-        # payflow.predict
-        #
-        # Child:
-        #
-        # failure.threshold
-        #
+        # =============================================
+        # 8.3 APPLY GOVERNED FAILURE THRESHOLD
         #
         # Rule:
         #
@@ -886,13 +1133,21 @@ class PayFlowModelService:
         #       ↓
         # FAILED
         #
-        # otherwise:
+        # otherwise
         #
         # SUCCESS
-        # =================================================
+        #
+        #
+        # Trace:
+        #
+        # payflow.predict
+        #   └── failure.threshold
+        # =============================================
 
         with mlflow.start_span(
-            name="failure.threshold"
+            name=(
+                "failure.threshold"
+            )
         ) as span:
 
             span.set_attributes(
@@ -947,6 +1202,21 @@ class PayFlowModelService:
             )
 
 
+            if (
+                len(
+                    predictions
+                )
+                != len(
+                    frame
+                )
+            ):
+
+                raise RuntimeError(
+                    "Prediction output length does not "
+                    "match input record count."
+                )
+
+
             failed_count = sum(
 
                 1
@@ -987,9 +1257,9 @@ class PayFlowModelService:
             )
 
 
-        # =================================================
-        # 6.3 BUILD API RESULT OBJECTS
-        # =================================================
+        # =============================================
+        # 8.4 BUILD API RESULTS
+        # =============================================
 
         results: list[
             dict[str, Any]
@@ -1014,6 +1284,18 @@ class PayFlowModelService:
             prediction_code = int(
                 prediction
             )
+
+
+            if prediction_code not in {
+                0,
+                1,
+            }:
+
+                raise RuntimeError(
+                    "Model threshold policy returned an "
+                    f"unsupported prediction code: "
+                    f"{prediction_code}"
+                )
 
 
             prediction_label = (
@@ -1051,21 +1333,21 @@ class PayFlowModelService:
 
 
     # =====================================================
-    # 7. OPERATIONAL MODEL METADATA
+    # 9. OPERATIONAL MODEL METADATA
     # =====================================================
 
     def metadata(
         self,
     ) -> dict[str, Any]:
         """
-        Return metadata for the currently loaded production
-        model.
+        Return operational metadata for the currently loaded
+        production model.
 
         Used by:
 
             GET /ready
             GET /v1/model
-            prediction logs
+            structured logs
             MLflow traces
         """
 
@@ -1077,12 +1359,10 @@ class PayFlowModelService:
             is not None
         )
 
-
         assert (
             self.failure_threshold
             is not None
         )
-
 
         assert (
             self.loaded_at_utc

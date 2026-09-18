@@ -298,28 +298,47 @@ def configure_logging() -> None:
 
 def configure_mlflow_tracing() -> None:
     """
-    Route PayFlow runtime traces to a dedicated MLflow
-    experiment.
+    Configure MLflow tracing for the running environment.
 
-    FastAPI already receives MLFLOW_TRACKING_URI through
-    Docker Compose.
+    Local host:
+        http://127.0.0.1:5050
+
+    Docker:
+        MLFLOW_TRACKING_URI=http://mlflow:5000
+
+    IMPORTANT:
+    This function should be called during FastAPI startup,
+    not while importing main.py.
     """
 
     tracking_uri = os.getenv(
         "MLFLOW_TRACKING_URI",
-        "http://mlflow:5000",
+        "http://127.0.0.1:5050",
     )
 
+    trace_experiment = os.getenv(
+        "PAYFLOW_TRACE_EXPERIMENT",
+        "payflow-production-traces",
+    )
 
     mlflow.set_tracking_uri(
         tracking_uri
     )
 
-
-    mlflow.set_experiment(
-        TRACE_EXPERIMENT
+    mlflow.set_registry_uri(
+        tracking_uri
     )
 
+    # -----------------------------------------------------
+    # Create / select the tracing experiment.
+    #
+    # This requires the MLflow server to actually be alive,
+    # which is why it belongs in FastAPI startup.
+    # -----------------------------------------------------
+
+    mlflow.set_experiment(
+        trace_experiment
+    )
 
 # =========================================================
 # REQUEST ID
