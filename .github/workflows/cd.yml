@@ -1,0 +1,349 @@
+# =========================================================
+# PAYFLOW AI — PART 8
+# CONTINUOUS DELIVERY
+#
+# Trigger:
+#
+#   Push / merge to main
+#        ↓
+#   Build immutable Docker images
+#        ↓
+#   Publish images to GitHub Container Registry (GHCR)
+#
+# This workflow does NOT deploy to Azure.
+#
+# Azure deployment remains Part 12.
+#
+#
+# Repository layout:
+#
+# mlflow-course/
+# │
+# ├── .github/
+# │   └── workflows/
+# │       └── cd.yml
+# │
+# └── payflow-ai/
+#     └── docker/
+#         ├── mlflow/
+#         │   └── Dockerfile
+#         │
+#         └── fastapi/
+#             └── Dockerfile
+#
+# =========================================================
+
+
+name: PayFlow CD
+
+
+# =========================================================
+# 1. TRIGGERS
+# =========================================================
+
+on:
+
+  push:
+
+    branches:
+      - main
+
+
+  workflow_dispatch:
+
+
+# =========================================================
+# 2. GITHUB TOKEN PERMISSIONS
+#
+# contents: read
+#     required to read repository content.
+#
+# packages: write
+#     required to publish images to GHCR.
+# =========================================================
+
+permissions:
+
+  contents: read
+
+  packages: write
+
+
+# =========================================================
+# 3. CONCURRENCY
+#
+# Do not cancel an image publishing workflow halfway
+# through a push.
+# =========================================================
+
+concurrency:
+
+  group: payflow-cd-main
+
+  cancel-in-progress: false
+
+
+# =========================================================
+# 4. GLOBAL REGISTRY
+# =========================================================
+
+env:
+
+  REGISTRY:
+    ghcr.io
+
+
+# =========================================================
+# 5. JOB
+# =========================================================
+
+jobs:
+
+  publish:
+
+    name: Publish Docker Images
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+
+    steps:
+
+      # ===================================================
+      # 6. CHECKOUT
+      # ===================================================
+
+      - name: Checkout repository
+
+        uses: actions/checkout@v7
+
+
+      # ===================================================
+      # 7. SHOW SOURCE COMMIT
+      #
+      # This gives us clear build provenance in the logs.
+      # ===================================================
+
+      - name: Show build information
+
+        shell: bash
+
+        run: |
+          echo "Repository : ${GITHUB_REPOSITORY}"
+          echo "Branch     : ${GITHUB_REF_NAME}"
+          echo "Commit SHA : ${GITHUB_SHA}"
+
+          echo
+          echo "PayFlow Dockerfiles:"
+
+          ls -l \
+            payflow-ai/docker/mlflow/Dockerfile \
+            payflow-ai/docker/fastapi/Dockerfile
+
+
+      # ===================================================
+      # 8. DOCKER BUILDX
+      # ===================================================
+
+      - name: Set up Docker Buildx
+
+        uses: docker/setup-buildx-action@v4
+
+
+      # ===================================================
+      # 9. LOGIN TO GHCR
+      #
+      # GITHUB_TOKEN is automatically created for this
+      # workflow.
+      #
+      # No PAT or plaintext Docker password is required.
+      # ===================================================
+
+      - name: Login to GHCR
+
+        uses: docker/login-action@v4
+
+        with:
+
+          registry:
+            ${{ env.REGISTRY }}
+
+          username:
+            ${{ github.actor }}
+
+          password:
+            ${{ secrets.GITHUB_TOKEN }}
+
+
+      # ===================================================
+      # 10. NORMALIZE GHCR OWNER
+      #
+      # Container image names must be lowercase.
+      #
+      # Example:
+      #
+      # hello-abhishekpanda
+      # ===================================================
+
+      - name: Prepare image owner
+
+        id: owner
+
+        shell: bash
+
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+
+          echo \
+            "value=${OWNER}" \
+            >> "$GITHUB_OUTPUT"
+
+          echo \
+            "GHCR owner: ${OWNER}"
+
+
+      # ===================================================
+      # 11. DEFINE MLFLOW IMAGE NAME
+      # ===================================================
+
+      - name: Prepare MLflow image name
+
+        id: mlflow_image
+
+        shell: bash
+
+        run: |
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/payflow-mlflow"
+
+          echo \
+            "name=${IMAGE_NAME}" \
+            >> "$GITHUB_OUTPUT"
+
+          echo \
+            "MLflow image: ${IMAGE_NAME}"
+
+
+      # ===================================================
+      # 12. DEFINE FASTAPI IMAGE NAME
+      # ===================================================
+
+      - name: Prepare FastAPI image name
+
+        id: fastapi_image
+
+        shell: bash
+
+        run: |
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/payflow-fastapi"
+
+          echo \
+            "name=${IMAGE_NAME}" \
+            >> "$GITHUB_OUTPUT"
+
+          echo \
+            "FastAPI image: ${IMAGE_NAME}"
+
+
+      # ===================================================
+      # 13. BUILD + PUSH MLFLOW
+      #
+      # IMPORTANT:
+      #
+      # context must be payflow-ai because its Dockerfile
+      # expects the PayFlow project as the build context.
+      #
+      # We publish:
+      #
+      #   :<commit-sha>
+      #   :latest
+      # ===================================================
+
+      - name: Build and push MLflow image
+
+        uses: docker/build-push-action@v7
+
+        with:
+
+          context:
+            ./payflow-ai
+
+          file:
+            ./payflow-ai/docker/mlflow/Dockerfile
+
+          push:
+            true
+
+          tags: |
+            ${{ steps.mlflow_image.outputs.name }}:${{ github.sha }}
+            ${{ steps.mlflow_image.outputs.name }}:latest
+
+          labels: |
+            org.opencontainers.image.title=PayFlow MLflow
+            org.opencontainers.image.description=PayFlow AI MLflow tracking and registry server
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+
+      # ===================================================
+      # 14. BUILD + PUSH FASTAPI
+      #
+      # Same immutable commit SHA is used for traceability.
+      # ===================================================
+
+      - name: Build and push FastAPI image
+
+        uses: docker/build-push-action@v7
+
+        with:
+
+          context:
+            ./payflow-ai
+
+          file:
+            ./payflow-ai/docker/fastapi/Dockerfile
+
+          push:
+            true
+
+          tags: |
+            ${{ steps.fastapi_image.outputs.name }}:${{ github.sha }}
+            ${{ steps.fastapi_image.outputs.name }}:latest
+
+          labels: |
+            org.opencontainers.image.title=PayFlow FastAPI
+            org.opencontainers.image.description=PayFlow AI production inference API
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+
+      # ===================================================
+      # 15. DELIVERY SUMMARY
+      # ===================================================
+
+      - name: Write delivery summary
+
+        shell: bash
+
+        run: |
+          {
+            echo "## PayFlow CD"
+            echo
+            echo "Docker images were published to GHCR."
+            echo
+            echo "### MLflow"
+            echo
+            echo "\`${{ steps.mlflow_image.outputs.name }}:${GITHUB_SHA}\`"
+            echo
+            echo "\`${{ steps.mlflow_image.outputs.name }}:latest\`"
+            echo
+            echo "### FastAPI"
+            echo
+            echo "\`${{ steps.fastapi_image.outputs.name }}:${GITHUB_SHA}\`"
+            echo
+            echo "\`${{ steps.fastapi_image.outputs.name }}:latest\`"
+            echo
+            echo "### Source"
+            echo
+            echo "Commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
