@@ -1,41 +1,62 @@
 # =========================================================
-# PAYFLOW AI — CONTINUOUS INTEGRATION
+# PAYFLOW AI — PART 8
+# GITHUB ACTIONS CONTINUOUS INTEGRATION
 #
-# Validates:
+# This workflow validates:
 #
 #   Python source
-#   Docker Compose
-#   Docker images
+#   Docker Compose syntax
+#   Docker image builds
 #   PostgreSQL
 #   MinIO
-#   MLflow
-#   MLflow artifact proxy
+#   MLflow Tracking Server
+#   MLflow PostgreSQL backend
+#   MLflow MinIO artifact round-trip
 #   Loki
 #   OpenTelemetry Collector
 #   Grafana
 #
-# We intentionally DO NOT manufacture a production
-# @champion inside CI.
+# IMPORTANT:
+#
+# GitHub Actions runs on a clean runner.
+#
+# The local file:
+#
+#     .env.docker
+#
+# does NOT exist there.
+#
+# CI therefore creates:
+#
+#     .env.ci
+#
+# and every Docker Compose command in this workflow uses it.
+#
+# We intentionally do NOT create a fake production
+# @champion in CI.
+#
+# Part 9 will add proper model/API test fixtures.
 # =========================================================
 
 
-name:
-  PayFlow CI
+name: PayFlow CI
 
+
+# =========================================================
+# 1. TRIGGERS
+# =========================================================
 
 on:
 
   pull_request:
 
     branches:
-
       - main
 
 
   push:
 
     branches:
-
       - main
 
 
@@ -43,47 +64,50 @@ on:
 
 
 # =========================================================
-# MINIMUM GITHUB TOKEN PERMISSIONS
+# 2. MINIMUM PERMISSIONS
 # =========================================================
 
 permissions:
 
-  contents:
-    read
+  contents: read
 
 
 # =========================================================
-# CANCEL OBSOLETE RUNS
+# 3. CANCEL OBSOLETE RUNS
 # =========================================================
 
 concurrency:
 
-  group:
-    payflow-ci-${{ github.ref }}
+  group: payflow-ci-${{ github.ref }}
 
-  cancel-in-progress:
-    true
+  cancel-in-progress: true
 
+
+# =========================================================
+# 4. JOBS
+# =========================================================
 
 jobs:
 
   ci:
 
-    name:
-      Validate PayFlow MLOps Platform
+    name: Validate PayFlow MLOps Platform
 
-    runs-on:
-      ubuntu-latest
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 35
 
 
-    timeout-minutes:
-      30
-
+    # =====================================================
+    # JOB-LEVEL ENVIRONMENT VARIABLES
+    #
+    # These are host-side URLs because GitHub Actions steps
+    # run on the runner host.
+    # =====================================================
 
     env:
 
-      PYTHONPATH:
-        src
+      PYTHONPATH: src
 
       PAYFLOW_DOCKER_MLFLOW_URI:
         http://127.0.0.1:5050
@@ -94,83 +118,99 @@ jobs:
       PAYFLOW_GRAFANA_URL:
         http://127.0.0.1:3000
 
+      PAYFLOW_ENV_FILE:
+        .env.ci
+
 
     steps:
 
-
       # ===================================================
-      # CHECKOUT
+      # 5. CHECKOUT
       # ===================================================
 
-      - name:
-          Checkout repository
+      - name: Checkout repository
 
-        uses:
-          actions/checkout@v7
+        uses: actions/checkout@v4
 
 
       # ===================================================
-      # PYTHON
+      # 6. DEBUG WORKSPACE
+      #
+      # Useful while stabilizing the workflow.
       # ===================================================
 
-      - name:
-          Set up Python
+      - name: Show repository files
 
-        uses:
-          actions/setup-python@v7
+        run: |
+          echo "Working directory:"
+          pwd
+
+          echo
+          echo "Repository files:"
+          ls -la
+
+          echo
+          echo "Docker files:"
+          find docker -maxdepth 4 -type f | sort || true
+
+          echo
+          echo "Workflow files:"
+          find .github -maxdepth 3 -type f | sort || true
+
+
+      # ===================================================
+      # 7. PYTHON SETUP
+      # ===================================================
+
+      - name: Set up Python
+
+        uses: actions/setup-python@v5
 
         with:
 
-          python-version:
-            "3.12"
+          python-version: "3.12"
 
-          cache:
-            pip
+          cache: pip
 
-          cache-dependency-path:
-            requirements-ci.txt
+          cache-dependency-path: requirements-ci.txt
 
 
-      - name:
-          Upgrade pip
+      - name: Upgrade pip
 
         run: |
           python -m pip install --upgrade pip
 
 
-      - name:
-          Install CI dependencies
+      - name: Install CI dependencies
 
         run: |
           pip install -r requirements-ci.txt
 
 
       # ===================================================
-      # BASIC PYTHON VALIDATION
-      # ===================================================
-
-      - name:
-          Compile PayFlow source
-
-        run: |
-          python -m compileall src scripts
-
-
-      # ===================================================
-      # CREATE CI ENVIRONMENT FILE
+      # 8. CREATE CI ENV FILE
       #
-      # These are temporary credentials on a disposable
-      # GitHub runner.
+      # This is the critical fix.
+      #
+      # GitHub runner does NOT have your local .env.docker.
+      #
+      # These values are temporary CI-only credentials on
+      # an ephemeral GitHub-hosted runner.
       # ===================================================
 
-      - name:
-          Create CI Docker environment
+      - name: Create CI environment file
+
+        shell: bash
 
         run: |
-          cat > .env.docker <<'EOF'
+          cat > "${PAYFLOW_ENV_FILE}" <<'EOF'
+          # =================================================
+          # PAYFLOW AI — CI ONLY
+          # =================================================
+
           POSTGRES_DB=mlflow
           POSTGRES_USER=mlflow
-          POSTGRES_PASSWORD=payflow_ci_postgres
+          POSTGRES_PASSWORD=payflow_ci_postgres_12345
           POSTGRES_HOST_PORT=5433
 
           MINIO_ROOT_USER=payflowci
@@ -189,7 +229,7 @@ jobs:
           OTEL_HTTP_HOST_PORT=4318
 
           GRAFANA_ADMIN_USER=admin
-          GRAFANA_ADMIN_PASSWORD=payflow_ci_grafana
+          GRAFANA_ADMIN_PASSWORD=payflow_ci_grafana_12345
 
           PAYFLOW_TRACE_EXPERIMENT=payflow-production-traces
           PAYFLOW_ENVIRONMENT=ci
@@ -197,45 +237,108 @@ jobs:
 
 
       # ===================================================
-      # COMPOSE VALIDATION
+      # 9. VERIFY ENV FILE EXISTS
       # ===================================================
 
-      - name:
-          Validate Docker Compose
+      - name: Verify CI environment file
+
+        run: |
+          test -f "${PAYFLOW_ENV_FILE}"
+
+          echo "CI environment file created:"
+          ls -l "${PAYFLOW_ENV_FILE}"
+
+          echo
+          echo "Variable names:"
+          cut -d= -f1 "${PAYFLOW_ENV_FILE}" \
+            | grep -v '^#' \
+            | grep -v '^$'
+
+
+      # ===================================================
+      # 10. PYTHON SYNTAX VALIDATION
+      # ===================================================
+
+      - name: Compile PayFlow Python source
+
+        run: |
+          python -m compileall \
+            src \
+            scripts
+
+
+      # ===================================================
+      # 11. DOCKER VERSION INFO
+      # ===================================================
+
+      - name: Show Docker versions
+
+        run: |
+          docker --version
+
+          docker compose version
+
+
+      # ===================================================
+      # 12. VALIDATE COMPOSE STRUCTURE
+      #
+      # This must happen BEFORE build/start.
+      # ===================================================
+
+      - name: Validate Docker Compose
 
         run: |
           docker compose \
-            --env-file .env.docker \
+            --env-file "${PAYFLOW_ENV_FILE}" \
             config \
             --quiet
 
 
       # ===================================================
-      # BUILD
+      # 13. SHOW RECOGNIZED SERVICES
       # ===================================================
 
-      - name:
-          Build Docker images
+      - name: Show Compose services
 
         run: |
           docker compose \
-            --env-file .env.docker \
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            config \
+            --services
+
+
+      # ===================================================
+      # 14. BUILD PAYFLOW IMAGES
+      # ===================================================
+
+      - name: Build Docker images
+
+        run: |
+          docker compose \
+            --env-file "${PAYFLOW_ENV_FILE}" \
             build
 
 
       # ===================================================
-      # START INFRASTRUCTURE
+      # 15. START PART 7 CORE INFRASTRUCTURE
       #
-      # FastAPI is NOT started here because the disposable
-      # Registry has no production @champion.
+      # We start only:
+      #
+      #   PostgreSQL
+      #   MinIO
+      #   MinIO initializer
+      #   MLflow
+      #
+      # FastAPI is intentionally NOT started in CI yet
+      # because this disposable Registry has no production
+      # @champion.
       # ===================================================
 
-      - name:
-          Start MLflow infrastructure
+      - name: Start MLflow infrastructure
 
         run: |
           docker compose \
-            --env-file .env.docker \
+            --env-file "${PAYFLOW_ENV_FILE}" \
             up -d \
             postgres \
             minio \
@@ -243,80 +346,82 @@ jobs:
             mlflow
 
 
-      - name:
-          Start observability infrastructure
+      # ===================================================
+      # 16. INITIAL STATUS
+      # ===================================================
+
+      - name: Show core infrastructure status
 
         run: |
           docker compose \
-            --env-file .env.docker \
-            up -d \
-            loki \
-            otel-collector \
-            grafana
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            ps \
+            -a
 
 
       # ===================================================
-      # WAIT FOR MLFLOW
+      # 17. WAIT FOR MLFLOW
       # ===================================================
 
-      - name:
-          Wait for MLflow
+      - name: Wait for MLflow
+
+        shell: bash
 
         run: |
-          for i in {1..60}; do
+          echo "Waiting for MLflow..."
+
+          for attempt in {1..90}
+          do
 
             if curl \
               --fail \
               --silent \
+              --show-error \
               http://127.0.0.1:5050/health
             then
+
+              echo
               echo "MLflow is healthy."
               exit 0
+
             fi
 
-            echo "Waiting for MLflow..."
+            echo \
+              "MLflow not ready yet. attempt=${attempt}/90"
+
             sleep 2
 
           done
 
+
+          echo
           echo "MLflow did not become healthy."
+
+          docker compose \
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            ps \
+            -a
+
+          docker compose \
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            logs \
+            --tail=200 \
+            mlflow
+
           exit 1
 
 
       # ===================================================
-      # WAIT FOR LOKI
+      # 18. MLFLOW STORAGE SMOKE TEST
+      #
+      # This proves:
+      #
+      # MLflow metadata -> PostgreSQL
+      #
+      # MLflow artifacts -> MinIO
       # ===================================================
 
-      - name:
-          Wait for Loki
-
-        run: |
-          for i in {1..60}; do
-
-            if curl \
-              --fail \
-              --silent \
-              http://127.0.0.1:3100/ready
-            then
-              echo "Loki is healthy."
-              exit 0
-            fi
-
-            echo "Waiting for Loki..."
-            sleep 2
-
-          done
-
-          echo "Loki did not become healthy."
-          exit 1
-
-
-      # ===================================================
-      # MLFLOW STORAGE TEST
-      # ===================================================
-
-      - name:
-          Verify PostgreSQL and MinIO through MLflow
+      - name: Verify PostgreSQL and MinIO through MLflow
 
         env:
 
@@ -331,107 +436,463 @@ jobs:
 
 
       # ===================================================
-      # DIRECT POSTGRES CHECK
+      # 19. DIRECT POSTGRESQL VERIFICATION
       # ===================================================
 
-      - name:
-          Verify smoke experiment in PostgreSQL
+      - name: Verify smoke experiment in PostgreSQL
 
         run: |
           docker compose \
-            --env-file .env.docker \
-            exec -T postgres \
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            exec \
+            -T \
+            postgres \
             psql \
             -U mlflow \
             -d mlflow \
-            -c \
-            "SELECT experiment_id, name FROM experiments;"
+            -P pager=off \
+            -c "
+              SELECT
+                experiment_id,
+                name,
+                artifact_location
+              FROM experiments
+              ORDER BY experiment_id;
+            "
 
 
       # ===================================================
-      # GRAFANA HEALTH
+      # 20. VERIFY SMOKE EXPERIMENT REALLY EXISTS
       # ===================================================
 
-      - name:
-          Verify Grafana
+      - name: Assert smoke experiment exists
+
+        shell: bash
 
         run: |
-          curl \
-            --fail \
-            http://127.0.0.1:3000/api/health
+          RESULT="$(
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              exec \
+              -T \
+              postgres \
+              psql \
+              -U mlflow \
+              -d mlflow \
+              -t \
+              -A \
+              -c "
+                SELECT name
+                FROM experiments
+                WHERE name = 'payflow-docker-smoke';
+              "
+          )"
+
+
+          echo "Query result: ${RESULT}"
+
+
+          if [[ "${RESULT}" != *"payflow-docker-smoke"* ]]
+          then
+
+            echo \
+              "payflow-docker-smoke was not found in PostgreSQL."
+
+            exit 1
+
+          fi
+
+
+          echo \
+            "PostgreSQL MLflow metadata verification passed."
 
 
       # ===================================================
-      # FINAL STATUS
+      # 21. START OBSERVABILITY INFRASTRUCTURE
+      #
+      # Loki
+      # OpenTelemetry Collector
+      # Grafana
       # ===================================================
 
-      - name:
-          Show Docker status
-
-        if:
-          always()
-
-        run: |
-          docker compose \
-            --env-file .env.docker \
-            ps
-
-
-      # ===================================================
-      # FAILURE DIAGNOSTICS
-      # ===================================================
-
-      - name:
-          Show MLflow logs
-
-        if:
-          failure()
-
-        run: |
-          docker compose \
-            --env-file .env.docker \
-            logs \
-            --tail=200 \
-            mlflow
-
-
-      - name:
-          Show MinIO logs
-
-        if:
-          failure()
-
-        run: |
-          docker compose \
-            --env-file .env.docker \
-            logs \
-            --tail=200 \
-            minio
-
-
-      - name:
-          Show Loki logs
-
-        if:
-          failure()
+      - name: Start observability infrastructure
 
         run: |
           docker compose \
-            --env-file .env.docker \
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            up -d \
+            loki \
+            otel-collector \
+            grafana
+
+
+      # ===================================================
+      # 22. WAIT FOR LOKI
+      # ===================================================
+
+      - name: Wait for Loki
+
+        shell: bash
+
+        run: |
+          echo "Waiting for Loki..."
+
+          for attempt in {1..90}
+          do
+
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              http://127.0.0.1:3100/ready
+            then
+
+              echo
+              echo "Loki is ready."
+              exit 0
+
+            fi
+
+            echo \
+              "Loki not ready yet. attempt=${attempt}/90"
+
+            sleep 2
+
+          done
+
+
+          echo
+          echo "Loki did not become ready."
+
+          docker compose \
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            ps \
+            -a
+
+          docker compose \
+            --env-file "${PAYFLOW_ENV_FILE}" \
             logs \
             --tail=200 \
             loki
 
+          exit 1
 
-      - name:
-          Show OpenTelemetry logs
 
-        if:
-          failure()
+      # ===================================================
+      # 23. WAIT FOR GRAFANA
+      # ===================================================
+
+      - name: Wait for Grafana
+
+        shell: bash
 
         run: |
+          echo "Waiting for Grafana..."
+
+          for attempt in {1..90}
+          do
+
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              http://127.0.0.1:3000/api/health
+            then
+
+              echo
+              echo "Grafana is healthy."
+              exit 0
+
+            fi
+
+            echo \
+              "Grafana not ready yet. attempt=${attempt}/90"
+
+            sleep 2
+
+          done
+
+
+          echo
+          echo "Grafana did not become healthy."
+
           docker compose \
-            --env-file .env.docker \
+            --env-file "${PAYFLOW_ENV_FILE}" \
+            ps \
+            -a
+
+          docker compose \
+            --env-file "${PAYFLOW_ENV_FILE}" \
             logs \
             --tail=200 \
-            otel-collector
+            grafana
+
+          exit 1
+
+
+      # ===================================================
+      # 24. CHECK OTEL COLLECTOR CONTAINER
+      #
+      # The Collector does not need a UI in this CI stage.
+      # We verify that its container remains running.
+      # ===================================================
+
+      - name: Verify OpenTelemetry Collector
+
+        shell: bash
+
+        run: |
+          STATUS="$(
+            docker inspect \
+              -f '{{.State.Status}}' \
+              payflow-otel-collector
+          )"
+
+
+          echo \
+            "OpenTelemetry Collector status: ${STATUS}"
+
+
+          if [[ "${STATUS}" != "running" ]]
+          then
+
+            docker logs \
+              payflow-otel-collector
+
+            exit 1
+
+          fi
+
+
+      # ===================================================
+      # 25. VERIFY GRAFANA LOKI DATASOURCE
+      #
+      # Grafana should receive the datasource from:
+      #
+      # docker/grafana/provisioning/datasources/
+      # ===================================================
+
+      - name: Verify Grafana Loki datasource
+
+        shell: bash
+
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --user \
+            "admin:payflow_ci_grafana_12345" \
+            http://127.0.0.1:3000/api/datasources/name/Loki
+
+
+      # ===================================================
+      # 26. FINAL DOCKER STATUS
+      # ===================================================
+
+      - name: Show Docker status
+
+        if: always()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              ps \
+              -a
+
+          else
+
+            echo \
+              "CI env file does not exist; skipping Compose status."
+
+            docker ps \
+              -a || true
+
+          fi
+
+
+      # ===================================================
+      # 27. DIAGNOSTICS — POSTGRESQL
+      # ===================================================
+
+      - name: Show PostgreSQL logs on failure
+
+        if: failure()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              logs \
+              --tail=200 \
+              postgres || true
+
+          else
+
+            echo \
+              ".env.ci missing; PostgreSQL Compose logs unavailable."
+
+          fi
+
+
+      # ===================================================
+      # 28. DIAGNOSTICS — MINIO
+      # ===================================================
+
+      - name: Show MinIO logs on failure
+
+        if: failure()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              logs \
+              --tail=200 \
+              minio || true
+
+          else
+
+            echo \
+              ".env.ci missing; MinIO Compose logs unavailable."
+
+          fi
+
+
+      # ===================================================
+      # 29. DIAGNOSTICS — MLFLOW
+      # ===================================================
+
+      - name: Show MLflow logs on failure
+
+        if: failure()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              logs \
+              --tail=200 \
+              mlflow || true
+
+          else
+
+            echo \
+              ".env.ci missing; MLflow Compose logs unavailable."
+
+          fi
+
+
+      # ===================================================
+      # 30. DIAGNOSTICS — LOKI
+      # ===================================================
+
+      - name: Show Loki logs on failure
+
+        if: failure()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              logs \
+              --tail=200 \
+              loki || true
+
+          else
+
+            echo \
+              ".env.ci missing; Loki Compose logs unavailable."
+
+          fi
+
+
+      # ===================================================
+      # 31. DIAGNOSTICS — OTEL
+      # ===================================================
+
+      - name: Show OpenTelemetry logs on failure
+
+        if: failure()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              logs \
+              --tail=200 \
+              otel-collector || true
+
+          else
+
+            echo \
+              ".env.ci missing; OTel Compose logs unavailable."
+
+          fi
+
+
+      # ===================================================
+      # 32. DIAGNOSTICS — GRAFANA
+      # ===================================================
+
+      - name: Show Grafana logs on failure
+
+        if: failure()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              logs \
+              --tail=200 \
+              grafana || true
+
+          else
+
+            echo \
+              ".env.ci missing; Grafana Compose logs unavailable."
+
+          fi
+
+
+      # ===================================================
+      # 33. CLEANUP
+      #
+      # GitHub runner is disposable, but explicit cleanup
+      # makes the workflow easier to understand.
+      # ===================================================
+
+      - name: Stop CI containers
+
+        if: always()
+
+        run: |
+          if [[ -f "${PAYFLOW_ENV_FILE}" ]]
+          then
+
+            docker compose \
+              --env-file "${PAYFLOW_ENV_FILE}" \
+              down \
+              --remove-orphans || true
+
+          else
+
+            echo \
+              "No CI env file; nothing to stop through Compose."
+
+          fi
