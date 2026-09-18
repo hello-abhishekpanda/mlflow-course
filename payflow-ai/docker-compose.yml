@@ -1,3 +1,55 @@
+# =========================================================
+# PAYFLOW AI — LOCAL MLOPS + OBSERVABILITY PLATFORM
+#
+# PART 7
+#   PostgreSQL
+#   MinIO
+#   MLflow
+#   FastAPI
+#
+# PART 8
+#   Loki
+#   OpenTelemetry Collector
+#   Grafana
+#
+# Runtime architecture:
+#
+#                    PostgreSQL
+#                        ▲
+#                        │
+#                   Backend Store
+#                        │
+#                        │
+#                MLflow Tracking
+#                     :5000
+#                    /     \
+#                   /       \
+#                  ▼         ▼
+#             Registry      MinIO
+#                           :9000
+#
+#                  ▲
+#                  │
+#               FastAPI
+#                :8000
+#                  │
+#          ┌───────┴─────────┐
+#          │                 │
+#          ▼                 ▼
+#   Structured Logs      MLflow Traces
+#          │                 │
+#          ▼                 ▼
+#  OpenTelemetry          MLflow
+#    Collector             :5000
+#          │
+#          ▼
+#        Loki
+#          │
+#          ▼
+#       Grafana
+# =========================================================
+
+
 name: payflow-mlops
 
 
@@ -6,17 +58,13 @@ services:
   # =======================================================
   # POSTGRESQL
   #
-  # MLflow backend metadata store.
+  # MLflow backend store.
   #
-  # Stores:
-  #   - experiments
-  #   - runs
-  #   - metrics
-  #   - parameters
-  #   - tags
-  #   - registered models
-  #   - versions
-  #   - aliases
+  # Host:
+  #   127.0.0.1:5433
+  #
+  # Docker:
+  #   postgres:5432
   # =======================================================
 
   postgres:
@@ -25,25 +73,24 @@ services:
 
     container_name: payflow-postgres
 
-
     environment:
 
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_DB:
+        ${POSTGRES_DB}
 
-      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_USER:
+        ${POSTGRES_USER}
 
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-
+      POSTGRES_PASSWORD:
+        ${POSTGRES_PASSWORD}
 
     ports:
 
       - "${POSTGRES_HOST_PORT:-5433}:5432"
 
-
     volumes:
 
       - postgres-data:/var/lib/postgresql/data
-
 
     healthcheck:
 
@@ -59,23 +106,28 @@ services:
 
       retries: 10
 
+      start_period: 5s
 
     networks:
 
       - payflow-network
 
-
     restart: unless-stopped
-
 
 
   # =======================================================
   # MINIO
   #
-  # S3-compatible MLflow artifact store.
+  # S3-compatible object storage used by MLflow.
   #
-  # 9000 -> S3-compatible API
-  # 9001 -> Web console
+  # Host API:
+  #   127.0.0.1:9000
+  #
+  # Host Console:
+  #   127.0.0.1:9001
+  #
+  # Docker:
+  #   minio:9000
   # =======================================================
 
   minio:
@@ -84,22 +136,23 @@ services:
 
     container_name: payflow-minio
 
-
     command:
-      [
-        "server",
-        "/data",
-        "--console-address",
-        ":9001"
-      ]
 
+      - server
+
+      - /data
+
+      - --console-address
+
+      - ":9001"
 
     environment:
 
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_USER:
+        ${MINIO_ROOT_USER}
 
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-
+      MINIO_ROOT_PASSWORD:
+        ${MINIO_ROOT_PASSWORD}
 
     ports:
 
@@ -107,29 +160,27 @@ services:
 
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
 
-
     volumes:
 
       - minio-data:/data
-
 
     networks:
 
       - payflow-network
 
-
     restart: unless-stopped
-
 
 
   # =======================================================
   # MINIO INITIALIZER
   #
+  # One-shot container.
+  #
   # Creates:
   #
-  #     s3://mlflow
+  #   s3://mlflow
   #
-  # once MinIO becomes available.
+  # and exits successfully.
   # =======================================================
 
   minio-init:
@@ -138,24 +189,27 @@ services:
 
     container_name: payflow-minio-init
 
-
     depends_on:
 
       - minio
 
-
     environment:
 
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_USER:
+        ${MINIO_ROOT_USER}
 
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_PASSWORD:
+        ${MINIO_ROOT_PASSWORD}
 
-      MLFLOW_BUCKET: ${MLFLOW_BUCKET}
-
+      MLFLOW_BUCKET:
+        ${MLFLOW_BUCKET}
 
     entrypoint:
+
       - /bin/sh
+
       - -c
+
       - |
         echo "Waiting for MinIO..."
 
@@ -181,32 +235,27 @@ services:
 
         echo "MLflow artifact bucket is ready."
 
-
     networks:
 
       - payflow-network
 
-
     restart: "no"
-
 
 
   # =======================================================
   # MLFLOW
   #
-  # IMPORTANT:
+  # Backend:
+  #   PostgreSQL
   #
-  # Build context MUST be:
+  # Artifacts:
+  #   MinIO
   #
-  #     .
+  # Host:
+  #   127.0.0.1:5050
   #
-  # Because docker-compose.yml lives at:
-  #
-  #     payflow-ai/docker-compose.yml
-  #
-  # Dockerfile therefore resolves to:
-  #
-  #     payflow-ai/docker/mlflow/Dockerfile
+  # Docker:
+  #   mlflow:5000
   # =======================================================
 
   mlflow:
@@ -215,69 +264,72 @@ services:
 
       context: .
 
-      dockerfile: docker/mlflow/Dockerfile
+      dockerfile:
+        docker/mlflow/Dockerfile
 
-
-    container_name: payflow-mlflow
-
+    container_name:
+      payflow-mlflow
 
     depends_on:
 
       postgres:
 
-        condition: service_healthy
-
+        condition:
+          service_healthy
 
       minio-init:
 
-        condition: service_completed_successfully
-
+        condition:
+          service_completed_successfully
 
     environment:
 
-      # PostgreSQL metadata backend.
+      # ---------------------------------------------------
+      # PostgreSQL backend
+      # ---------------------------------------------------
+
       MLFLOW_BACKEND_STORE_URI:
         postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 
 
-      # MinIO endpoint visible from inside Docker.
+      # ---------------------------------------------------
+      # MinIO / S3
+      # ---------------------------------------------------
+
       MLFLOW_S3_ENDPOINT_URL:
         http://minio:9000
-
 
       AWS_ACCESS_KEY_ID:
         ${MINIO_ROOT_USER}
 
-
       AWS_SECRET_ACCESS_KEY:
         ${MINIO_ROOT_PASSWORD}
 
-
       AWS_DEFAULT_REGION:
         us-east-1
-
 
       MLFLOW_BUCKET:
         ${MLFLOW_BUCKET}
 
 
     command:
-      - /bin/sh
-      - -c
-      - |
-        mlflow server \
-          --host 0.0.0.0 \
-          --port 5000 \
-          --backend-store-uri "$${MLFLOW_BACKEND_STORE_URI}" \
-          --artifacts-destination "s3://$${MLFLOW_BUCKET}" \
-          --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:5000" \
-          --cors-allowed-origins "http://localhost:5050,http://127.0.0.1:5050,http://localhost:8001,http://127.0.0.1:8001"
 
+      - /bin/sh
+
+      - -c
+
+      - >
+        mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri "$${MLFLOW_BACKEND_STORE_URI}"
+        --artifacts-destination "s3://$${MLFLOW_BUCKET}"
+        --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:5000,payflow-mlflow:5000"
+        --cors-allowed-origins "http://localhost:5050,http://127.0.0.1:5050,http://localhost:8001,http://127.0.0.1:8001,http://localhost:3000,http://127.0.0.1:3000"
 
     ports:
 
       - "${MLFLOW_HOST_PORT:-5050}:5000"
-
 
     healthcheck:
 
@@ -295,27 +347,183 @@ services:
 
       retries: 12
 
+      start_period: 10s
 
     networks:
 
       - payflow-network
 
+    restart: unless-stopped
+
+
+  # =======================================================
+  # LOKI
+  #
+  # Centralized log backend.
+  #
+  # Host:
+  #   127.0.0.1:3100
+  #
+  # Docker:
+  #   loki:3100
+  # =======================================================
+
+  loki:
+
+    image: grafana/loki:3.7.0
+
+    container_name: payflow-loki
+
+    command:
+
+      - -config.file=/etc/loki/local-config.yaml
+
+    ports:
+
+      - "${LOKI_HOST_PORT:-3100}:3100"
+
+    volumes:
+
+      - ./docker/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+
+      - loki-data:/loki
+
+    networks:
+
+      - payflow-network
 
     restart: unless-stopped
 
+
+  # =======================================================
+  # OPENTELEMETRY COLLECTOR
+  #
+  # Receives OTLP logs from FastAPI.
+  #
+  # Host:
+  #   gRPC :4317
+  #   HTTP :4318
+  #
+  # Docker:
+  #   otel-collector:4317
+  #   otel-collector:4318
+  # =======================================================
+
+  otel-collector:
+
+    image: otel/opentelemetry-collector-contrib:0.161.0
+
+    container_name:
+      payflow-otel-collector
+
+    command:
+
+      - --config=/etc/otelcol-contrib/config.yaml
+
+    depends_on:
+
+      - loki
+
+    volumes:
+
+      - ./docker/otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+
+    ports:
+
+      - "${OTEL_GRPC_HOST_PORT:-4317}:4317"
+
+      - "${OTEL_HTTP_HOST_PORT:-4318}:4318"
+
+    networks:
+
+      - payflow-network
+
+    restart: unless-stopped
+
+
+  # =======================================================
+  # GRAFANA
+  #
+  # UI for Loki logs.
+  #
+  # Host:
+  #   127.0.0.1:3000
+  #
+  # Docker:
+  #   grafana:3000
+  # =======================================================
+
+  grafana:
+
+    image: grafana/grafana:latest
+
+    container_name:
+      payflow-grafana
+
+    depends_on:
+
+      - loki
+
+    environment:
+
+      GF_SECURITY_ADMIN_USER:
+        ${GRAFANA_ADMIN_USER:-admin}
+
+      GF_SECURITY_ADMIN_PASSWORD:
+        ${GRAFANA_ADMIN_PASSWORD:-payflow_grafana_dev}
+
+      GF_USERS_ALLOW_SIGN_UP:
+        "false"
+
+    ports:
+
+      - "${GRAFANA_HOST_PORT:-3000}:3000"
+
+    volumes:
+
+      - grafana-data:/var/lib/grafana
+
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+
+    networks:
+
+      - payflow-network
+
+    restart: unless-stopped
 
 
   # =======================================================
   # FASTAPI
   #
-  # Build context is ALSO:
+  # Production inference service.
   #
-  #     .
+  # Loads:
   #
-  # This allows Dockerfile to access:
+  #   models:/payflow-payment-success@champion
   #
-  #     src/
-  #     docker/fastapi/requirements.txt
+  # Host:
+  #   127.0.0.1:8001
+  #
+  # Docker:
+  #   fastapi:8000
+  #
+  # Logs:
+  #
+  #   FastAPI
+  #      ↓
+  #   OpenTelemetry Collector
+  #      ↓
+  #   Loki
+  #      ↓
+  #   Grafana
+  #
+  # Traces:
+  #
+  #   FastAPI
+  #      ↓
+  #   MLflow Tracing
+  #      ↓
+  #   MLflow :5000
   # =======================================================
 
   fastapi:
@@ -324,40 +532,65 @@ services:
 
       context: .
 
-      dockerfile: docker/fastapi/Dockerfile
+      dockerfile:
+        docker/fastapi/Dockerfile
 
-
-    container_name: payflow-fastapi
-
+    container_name:
+      payflow-fastapi
 
     depends_on:
 
       mlflow:
 
-        condition: service_healthy
+        condition:
+          service_healthy
 
+      otel-collector:
+
+        condition:
+          service_started
 
     environment:
 
-      # Containers talk using service names.
-      #
-      # Never use localhost:5050 here.
+      # ---------------------------------------------------
+      # MLflow Registry
+      # ---------------------------------------------------
+
       MLFLOW_TRACKING_URI:
         http://mlflow:5000
 
-
       PAYFLOW_REGISTERED_MODEL_NAME:
         payflow-payment-success
-
 
       PAYFLOW_MODEL_ALIAS:
         champion
 
 
+      # ---------------------------------------------------
+      # OpenTelemetry Logs
+      # ---------------------------------------------------
+
+      OTEL_SERVICE_NAME:
+        payflow-fastapi
+
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:
+        http://otel-collector:4318/v1/logs
+
+
+      # ---------------------------------------------------
+      # MLflow Tracing
+      # ---------------------------------------------------
+
+      PAYFLOW_TRACE_EXPERIMENT:
+        ${PAYFLOW_TRACE_EXPERIMENT:-payflow-production-traces}
+
+      PAYFLOW_ENVIRONMENT:
+        ${PAYFLOW_ENVIRONMENT}
+
+
     ports:
 
       - "${FASTAPI_HOST_PORT:-8001}:8000"
-
 
     healthcheck:
 
@@ -375,34 +608,59 @@ services:
 
       retries: 12
 
+      start_period: 20s
 
     networks:
 
       - payflow-network
 
-
     restart: unless-stopped
-
 
 
 # =========================================================
 # PERSISTENT VOLUMES
+#
+# IMPORTANT:
+#
+# Normal restart / down preserves these.
+#
+# docker compose down -v
+#
+# deletes them.
 # =========================================================
 
 volumes:
 
+  # PostgreSQL MLflow metadata
   postgres-data:
 
+  # MinIO MLflow artifacts
   minio-data:
 
+  # Loki log data
+  loki-data:
+
+  # Grafana state
+  grafana-data:
 
 
 # =========================================================
 # PRIVATE DOCKER NETWORK
+#
+# Service discovery names:
+#
+#   postgres
+#   minio
+#   mlflow
+#   loki
+#   otel-collector
+#   grafana
+#   fastapi
 # =========================================================
 
 networks:
 
   payflow-network:
 
-    name: payflow-network
+    name:
+      payflow-network

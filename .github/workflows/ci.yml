@@ -1,0 +1,437 @@
+# =========================================================
+# PAYFLOW AI — CONTINUOUS INTEGRATION
+#
+# Validates:
+#
+#   Python source
+#   Docker Compose
+#   Docker images
+#   PostgreSQL
+#   MinIO
+#   MLflow
+#   MLflow artifact proxy
+#   Loki
+#   OpenTelemetry Collector
+#   Grafana
+#
+# We intentionally DO NOT manufacture a production
+# @champion inside CI.
+# =========================================================
+
+
+name:
+  PayFlow CI
+
+
+on:
+
+  pull_request:
+
+    branches:
+
+      - main
+
+
+  push:
+
+    branches:
+
+      - main
+
+
+  workflow_dispatch:
+
+
+# =========================================================
+# MINIMUM GITHUB TOKEN PERMISSIONS
+# =========================================================
+
+permissions:
+
+  contents:
+    read
+
+
+# =========================================================
+# CANCEL OBSOLETE RUNS
+# =========================================================
+
+concurrency:
+
+  group:
+    payflow-ci-${{ github.ref }}
+
+  cancel-in-progress:
+    true
+
+
+jobs:
+
+  ci:
+
+    name:
+      Validate PayFlow MLOps Platform
+
+    runs-on:
+      ubuntu-latest
+
+
+    timeout-minutes:
+      30
+
+
+    env:
+
+      PYTHONPATH:
+        src
+
+      PAYFLOW_DOCKER_MLFLOW_URI:
+        http://127.0.0.1:5050
+
+      PAYFLOW_LOKI_URL:
+        http://127.0.0.1:3100
+
+      PAYFLOW_GRAFANA_URL:
+        http://127.0.0.1:3000
+
+
+    steps:
+
+
+      # ===================================================
+      # CHECKOUT
+      # ===================================================
+
+      - name:
+          Checkout repository
+
+        uses:
+          actions/checkout@v7
+
+
+      # ===================================================
+      # PYTHON
+      # ===================================================
+
+      - name:
+          Set up Python
+
+        uses:
+          actions/setup-python@v7
+
+        with:
+
+          python-version:
+            "3.12"
+
+          cache:
+            pip
+
+          cache-dependency-path:
+            requirements-ci.txt
+
+
+      - name:
+          Upgrade pip
+
+        run: |
+          python -m pip install --upgrade pip
+
+
+      - name:
+          Install CI dependencies
+
+        run: |
+          pip install -r requirements-ci.txt
+
+
+      # ===================================================
+      # BASIC PYTHON VALIDATION
+      # ===================================================
+
+      - name:
+          Compile PayFlow source
+
+        run: |
+          python -m compileall src scripts
+
+
+      # ===================================================
+      # CREATE CI ENVIRONMENT FILE
+      #
+      # These are temporary credentials on a disposable
+      # GitHub runner.
+      # ===================================================
+
+      - name:
+          Create CI Docker environment
+
+        run: |
+          cat > .env.docker <<'EOF'
+          POSTGRES_DB=mlflow
+          POSTGRES_USER=mlflow
+          POSTGRES_PASSWORD=payflow_ci_postgres
+          POSTGRES_HOST_PORT=5433
+
+          MINIO_ROOT_USER=payflowci
+          MINIO_ROOT_PASSWORD=payflow_ci_minio_12345
+          MLFLOW_BUCKET=mlflow
+          MINIO_API_PORT=9000
+          MINIO_CONSOLE_PORT=9001
+
+          MLFLOW_HOST_PORT=5050
+          FASTAPI_HOST_PORT=8001
+
+          GRAFANA_HOST_PORT=3000
+          LOKI_HOST_PORT=3100
+
+          OTEL_GRPC_HOST_PORT=4317
+          OTEL_HTTP_HOST_PORT=4318
+
+          GRAFANA_ADMIN_USER=admin
+          GRAFANA_ADMIN_PASSWORD=payflow_ci_grafana
+
+          PAYFLOW_TRACE_EXPERIMENT=payflow-production-traces
+          PAYFLOW_ENVIRONMENT=ci
+          EOF
+
+
+      # ===================================================
+      # COMPOSE VALIDATION
+      # ===================================================
+
+      - name:
+          Validate Docker Compose
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            config \
+            --quiet
+
+
+      # ===================================================
+      # BUILD
+      # ===================================================
+
+      - name:
+          Build Docker images
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            build
+
+
+      # ===================================================
+      # START INFRASTRUCTURE
+      #
+      # FastAPI is NOT started here because the disposable
+      # Registry has no production @champion.
+      # ===================================================
+
+      - name:
+          Start MLflow infrastructure
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            up -d \
+            postgres \
+            minio \
+            minio-init \
+            mlflow
+
+
+      - name:
+          Start observability infrastructure
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            up -d \
+            loki \
+            otel-collector \
+            grafana
+
+
+      # ===================================================
+      # WAIT FOR MLFLOW
+      # ===================================================
+
+      - name:
+          Wait for MLflow
+
+        run: |
+          for i in {1..60}; do
+
+            if curl \
+              --fail \
+              --silent \
+              http://127.0.0.1:5050/health
+            then
+              echo "MLflow is healthy."
+              exit 0
+            fi
+
+            echo "Waiting for MLflow..."
+            sleep 2
+
+          done
+
+          echo "MLflow did not become healthy."
+          exit 1
+
+
+      # ===================================================
+      # WAIT FOR LOKI
+      # ===================================================
+
+      - name:
+          Wait for Loki
+
+        run: |
+          for i in {1..60}; do
+
+            if curl \
+              --fail \
+              --silent \
+              http://127.0.0.1:3100/ready
+            then
+              echo "Loki is healthy."
+              exit 0
+            fi
+
+            echo "Waiting for Loki..."
+            sleep 2
+
+          done
+
+          echo "Loki did not become healthy."
+          exit 1
+
+
+      # ===================================================
+      # MLFLOW STORAGE TEST
+      # ===================================================
+
+      - name:
+          Verify PostgreSQL and MinIO through MLflow
+
+        env:
+
+          MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD:
+            "false"
+
+          MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD:
+            "false"
+
+        run: |
+          python scripts/16_test_docker_mlflow.py
+
+
+      # ===================================================
+      # DIRECT POSTGRES CHECK
+      # ===================================================
+
+      - name:
+          Verify smoke experiment in PostgreSQL
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            exec -T postgres \
+            psql \
+            -U mlflow \
+            -d mlflow \
+            -c \
+            "SELECT experiment_id, name FROM experiments;"
+
+
+      # ===================================================
+      # GRAFANA HEALTH
+      # ===================================================
+
+      - name:
+          Verify Grafana
+
+        run: |
+          curl \
+            --fail \
+            http://127.0.0.1:3000/api/health
+
+
+      # ===================================================
+      # FINAL STATUS
+      # ===================================================
+
+      - name:
+          Show Docker status
+
+        if:
+          always()
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            ps
+
+
+      # ===================================================
+      # FAILURE DIAGNOSTICS
+      # ===================================================
+
+      - name:
+          Show MLflow logs
+
+        if:
+          failure()
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            logs \
+            --tail=200 \
+            mlflow
+
+
+      - name:
+          Show MinIO logs
+
+        if:
+          failure()
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            logs \
+            --tail=200 \
+            minio
+
+
+      - name:
+          Show Loki logs
+
+        if:
+          failure()
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            logs \
+            --tail=200 \
+            loki
+
+
+      - name:
+          Show OpenTelemetry logs
+
+        if:
+          failure()
+
+        run: |
+          docker compose \
+            --env-file .env.docker \
+            logs \
+            --tail=200 \
+            otel-collector

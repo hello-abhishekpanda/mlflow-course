@@ -1,0 +1,87 @@
+# =========================================================
+# PAYFLOW AI — OPENTELEMETRY COLLECTOR
+#
+# Current Part 8 responsibility:
+#
+# FastAPI OTLP logs
+#       ↓
+# OpenTelemetry Collector
+#       ↓
+# Loki native OTLP endpoint
+#
+# MLflow traces are sent directly using MLflow Tracing SDK.
+# =========================================================
+
+
+receivers:
+
+  otlp:
+
+    protocols:
+
+      grpc:
+
+        endpoint:
+          0.0.0.0:4317
+
+      http:
+
+        endpoint:
+          0.0.0.0:4318
+
+
+# =========================================================
+# PROCESS TELEMETRY IN BATCHES
+# =========================================================
+
+processors:
+
+  batch:
+
+    timeout: 1s
+
+    send_batch_size: 512
+
+
+# =========================================================
+# EXPORT LOGS TO LOKI
+#
+# Loki has a native OTLP endpoint:
+#
+#     http://loki:3100/otlp
+# =========================================================
+
+exporters:
+
+  otlphttp/loki:
+
+    endpoint:
+      http://loki:3100/otlp
+
+
+  # Useful while learning/debugging.
+  debug:
+
+    verbosity:
+      basic
+
+
+# =========================================================
+# PIPELINES
+# =========================================================
+
+service:
+
+  pipelines:
+
+    logs:
+
+      receivers:
+        - otlp
+
+      processors:
+        - batch
+
+      exporters:
+        - otlphttp/loki
+        - debug

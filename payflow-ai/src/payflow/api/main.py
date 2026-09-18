@@ -7,17 +7,15 @@ from contextlib import (
     asynccontextmanager,
 )
 
-from typing import Annotated
-
-from uuid import uuid4
-
 from fastapi import (
     FastAPI,
-    Header,
     HTTPException,
+    Request,
     Response,
     status,
 )
+
+import mlflow
 
 from payflow.api.config import (
     load_settings,
@@ -27,6 +25,12 @@ from payflow.api.model_service import (
     ModelContractError,
     ModelNotReadyError,
     PayFlowModelService,
+)
+
+from payflow.api.observability import (
+    configure_logging,
+    configure_mlflow_tracing,
+    request_logging_middleware,
 )
 
 from payflow.api.schemas import (
@@ -41,6 +45,44 @@ from payflow.api.schemas import (
 
 
 # =========================================================
+# PAYFLOW AI — FASTAPI APPLICATION
+#
+# PART 6
+#   Production inference API
+#
+# PART 7
+#   Dockerized FastAPI
+#   MLflow Registry @champion
+#   PostgreSQL + MinIO
+#
+# PART 8
+#   Structured logging
+#   OpenTelemetry -> Loki -> Grafana
+#   MLflow Tracing
+#
+#
+# Runtime:
+#
+# Client
+#   ↓
+# FastAPI
+#   │
+#   ├── Structured Logs
+#   │       ↓
+#   │   OpenTelemetry
+#   │       ↓
+#   │      Loki
+#   │       ↓
+#   │    Grafana
+#   │
+#   └── MLflow Traces
+#           ↓
+#       MLflow :5000
+#
+# =========================================================
+
+
+# =========================================================
 # 1. CONFIGURATION
 # =========================================================
 
@@ -50,21 +92,34 @@ settings = (
 
 
 # =========================================================
-# 2. LOGGING
+# 2. OBSERVABILITY INITIALIZATION
+#
+# configure_logging()
+#
+#   Python logging
+#       ↓
+#   stdout
+#       +
+#   OpenTelemetry
+#       ↓
+#   Loki
+#
+#
+# configure_mlflow_tracing()
+#
+#   MLflow tracing SDK
+#       ↓
+#   payflow-production-traces
 # =========================================================
 
-logging.basicConfig(
+configure_logging()
 
-    level=logging.INFO,
+configure_mlflow_tracing()
 
-    format=(
-        "%(asctime)s "
-        "%(levelname)s "
-        "%(name)s "
-        "%(message)s"
-    ),
-)
 
+# =========================================================
+# 3. LOGGER
+# =========================================================
 
 logger = logging.getLogger(
     "payflow.api"
@@ -72,9 +127,12 @@ logger = logging.getLogger(
 
 
 # =========================================================
-# 3. MODEL SERVICE
+# 4. MODEL SERVICE
 #
-# This object exists once for the API process.
+# Create one service object for the entire API process.
+#
+# The model itself is loaded once during application
+# startup through the FastAPI lifespan handler.
 # =========================================================
 
 model_service = (
@@ -85,12 +143,29 @@ model_service = (
 
 
 # =========================================================
-# 4. FASTAPI LIFESPAN
+# 5. FASTAPI LIFESPAN
 #
-# Load the ML model ONCE when the API process starts.
+# Startup:
 #
-# Do NOT download and deserialize the model for every HTTP
-# request.
+#   FastAPI starts
+#       ↓
+#   Resolve @champion
+#       ↓
+#   Validate governance
+#       ↓
+#   Load failure threshold
+#       ↓
+#   Load sklearn Pipeline
+#
+#
+# Shutdown:
+#
+#   log shutdown event
+#
+#
+# IMPORTANT:
+#
+# We do NOT download the ML model for every request.
 # =========================================================
 
 @asynccontextmanager
@@ -99,11 +174,21 @@ async def lifespan(
 ):
 
     logger.info(
-        "Starting PayFlow API."
+        "application.starting",
+        extra={
+            "service":
+                "payflow-fastapi",
+        },
     )
 
 
     try:
+
+        # -------------------------------------------------
+        # Resolve and load:
+        #
+        # models:/payflow-payment-success@champion
+        # -------------------------------------------------
 
         model_service.load()
 
@@ -114,50 +199,80 @@ async def lifespan(
 
 
         logger.info(
-            "Loaded model %s version=%s alias=@%s "
-            "threshold=%.6f",
-            metadata[
-                "model_name"
-            ],
-            metadata[
-                "model_version"
-            ],
-            metadata[
-                "model_alias"
-            ],
-            metadata[
-                "failure_threshold"
-            ],
+            "model.loaded",
+            extra={
+                "service":
+                    "payflow-fastapi",
+
+                "model_name":
+                    metadata[
+                        "model_name"
+                    ],
+
+                "model_version":
+                    metadata[
+                        "model_version"
+                    ],
+
+                "model_alias":
+                    metadata[
+                        "model_alias"
+                    ],
+
+                "failure_threshold":
+                    metadata[
+                        "failure_threshold"
+                    ],
+
+                "model_uri":
+                    metadata[
+                        "model_uri"
+                    ],
+            },
         )
 
 
     except Exception:
 
         # -------------------------------------------------
-        # Keep process alive so /health can report alive
-        # while /ready reports 503.
+        # Keep the API process alive.
         #
-        # Kubernetes/container platforms distinguish
-        # liveness from readiness for exactly this reason.
+        # /health
+        #     → still returns alive
+        #
+        # /ready
+        #     → returns 503
+        #
+        # This is the correct liveness/readiness split.
         # -------------------------------------------------
 
         logger.exception(
-            "PayFlow model failed to load."
+            "model.load_failed",
+            extra={
+                "service":
+                    "payflow-fastapi",
+            },
         )
 
 
-    # Application starts accepting traffic here.
+    # -----------------------------------------------------
+    # FastAPI begins serving HTTP requests here.
+    # -----------------------------------------------------
+
     yield
 
 
     logger.info(
-        "Stopping PayFlow API."
+        "application.stopping",
+        extra={
+            "service":
+                "payflow-fastapi",
+        },
     )
 
 
-# FastAPI recommends lifespan handlers for shared resources
-# such as ML models that should be loaded once before the
-# application begins serving requests.
+# =========================================================
+# 6. FASTAPI APPLICATION
 # =========================================================
 
 app = FastAPI(
@@ -172,21 +287,55 @@ app = FastAPI(
 
     description=(
         "Production-style PayFlow AI API backed by "
-        "MLflow Model Registry."
+        "MLflow Model Registry with structured logging "
+        "and MLflow tracing."
     ),
 
     lifespan=(
         lifespan
     ),
 )
+
+
 # =========================================================
-# 5. LIVENESS ENDPOINT
+# 7. REQUEST LOGGING MIDDLEWARE
 #
-# Liveness answers:
+# Every request receives:
 #
-#     Is the API process running?
+#   request_id
 #
-# It does NOT guarantee the ML model is ready.
+# The middleware also emits:
+#
+#   request.started
+#   request.completed
+#   request.failed
+#
+# These logs flow to:
+#
+# FastAPI
+#   ↓
+# OpenTelemetry Collector
+#   ↓
+# Loki
+#   ↓
+# Grafana
+# =========================================================
+
+app.middleware(
+    "http"
+)(
+    request_logging_middleware
+)
+
+
+# =========================================================
+# 8. LIVENESS
+#
+# Answers:
+#
+#     Is the FastAPI process alive?
+#
+# It does NOT mean the ML model is ready.
 # =========================================================
 
 @app.get(
@@ -217,19 +366,19 @@ def health() -> HealthResponse:
 
 
 # =========================================================
-# 6. READINESS ENDPOINT
+# 9. READINESS
 #
-# Readiness answers:
+# Answers:
 #
-#     Can this API safely accept prediction traffic?
+#     Can PayFlow safely accept prediction traffic?
 #
-# For PayFlow that means:
+# Ready means:
 #
-#     @champion resolved
-#     quality gate passed
-#     registry eligible
-#     threshold loaded
-#     model loaded
+#   @champion resolved
+#   quality gate passed
+#   registry eligible
+#   threshold loaded
+#   model loaded
 # =========================================================
 
 @app.get(
@@ -296,10 +445,10 @@ def ready() -> ReadinessResponse:
 
 
 # =========================================================
-# 7. MODEL METADATA
+# 10. MODEL METADATA
 #
-# Operational endpoint showing exactly what model this API
-# has loaded.
+# Shows exactly which governed MLflow model this API has
+# loaded.
 # =========================================================
 
 @app.get(
@@ -324,7 +473,9 @@ def model_metadata() -> ModelMetadataResponse:
                 .HTTP_503_SERVICE_UNAVAILABLE
             ),
 
-            detail="Model is not ready.",
+            detail=(
+                "Model is not ready."
+            ),
         )
 
 
@@ -334,7 +485,29 @@ def model_metadata() -> ModelMetadataResponse:
 
 
 # =========================================================
-# 8. SINGLE TRANSACTION PREDICTION
+# 11. SINGLE TRANSACTION PREDICTION
+#
+# Observability:
+#
+# HTTP request
+#      ↓
+# request_logging_middleware
+#      ↓
+# request_id
+#      ↓
+# MLflow trace
+#      ↓
+# payflow.predict
+#      ↓
+# model_service.predict_records()
+#
+#
+# IMPORTANT:
+#
+# We intentionally DO NOT send the complete payment
+# payload to MLflow tracing.
+#
+# Only operational metadata is traced.
 # =========================================================
 
 @app.post(
@@ -352,38 +525,32 @@ def predict(
 
     payload: TransactionFeatures,
 
-    response: Response,
+    request: Request,
 
-    x_request_id: Annotated[
-        str | None,
-        Header(
-            alias="X-Request-ID"
-        ),
-    ] = None,
+    response: Response,
 
 ) -> PredictionResponse:
     """
-    Predict whether a single payment is likely to FAILED
+    Predict whether one UPI payment is likely to be FAILED
     or SUCCESS using the current MLflow @champion model.
     """
 
     # -----------------------------------------------------
-    # Reuse client request ID if supplied.
+    # The request ID has already been created by our
+    # request middleware.
     #
-    # Otherwise create one.
+    # If the caller supplied:
     #
-    # Later this becomes useful for distributed tracing.
+    #     X-Request-ID
+    #
+    # the middleware reused it.
+    #
+    # Therefore logs and traces now use exactly the same
+    # correlation identifier.
     # -----------------------------------------------------
 
     request_id = (
-
-        x_request_id
-
-        or
-
-        str(
-            uuid4()
-        )
+        request.state.request_id
     )
 
 
@@ -395,8 +562,8 @@ def predict(
     try:
 
         # -------------------------------------------------
-        # model_dump() converts validated Pydantic input
-        # into normal Python dictionary.
+        # Convert validated Pydantic input into the record
+        # format expected by PayFlowModelService.
         # -------------------------------------------------
 
         records = [
@@ -404,15 +571,145 @@ def predict(
         ]
 
 
-        result = (
-            model_service
-            .predict_records(
-                records
-            )[0]
+        # -------------------------------------------------
+        # Retrieve model metadata before creating trace
+        # attributes.
+        #
+        # This does not reload the model.
+        # -------------------------------------------------
+
+        metadata = (
+            model_service.metadata()
         )
 
 
+        # =================================================
+        # MLFLOW TRACE
+        #
+        # Creates:
+        #
+        # payflow.predict
+        #
+        # under:
+        #
+        # payflow-production-traces
+        #
+        # We log operational metadata only.
+        # =================================================
+
+        with mlflow.start_span(
+            name="payflow.predict"
+        ) as span:
+
+            # ---------------------------------------------
+            # Minimal trace input.
+            #
+            # Do NOT store all payment features here.
+            # ---------------------------------------------
+
+            span.set_inputs(
+                {
+                    "request_id":
+                        request_id,
+
+                    "feature_count":
+                        len(
+                            records[0]
+                        ),
+                }
+            )
+
+
+            # ---------------------------------------------
+            # MLflow / model lineage information.
+            # ---------------------------------------------
+
+            span.set_attributes(
+                {
+                    "service.name":
+                        "payflow-fastapi",
+
+                    "payflow.request_id":
+                        request_id,
+
+                    "mlflow.model.name":
+                        str(
+                            metadata[
+                                "model_name"
+                            ]
+                        ),
+
+                    "mlflow.model.version":
+                        str(
+                            metadata[
+                                "model_version"
+                            ]
+                        ),
+
+                    "mlflow.model.alias":
+                        str(
+                            metadata[
+                                "model_alias"
+                            ]
+                        ),
+
+                    "payflow.failure_threshold":
+                        float(
+                            metadata[
+                                "failure_threshold"
+                            ]
+                        ),
+                }
+            )
+
+
+            # ---------------------------------------------
+            # Actual inference.
+            # ---------------------------------------------
+
+            result = (
+                model_service
+                .predict_records(
+                    records
+                )[0]
+            )
+
+
+            # ---------------------------------------------
+            # Safe operational trace output.
+            # ---------------------------------------------
+
+            span.set_outputs(
+                {
+                    "request_id":
+                        request_id,
+
+                    "prediction":
+                        result[
+                            "prediction"
+                        ],
+
+                    "prediction_code":
+                        result[
+                            "prediction_code"
+                        ],
+                }
+            )
+
+
     except ModelNotReadyError as error:
+
+        logger.warning(
+            "prediction.model_not_ready",
+            extra={
+                "request_id":
+                    request_id,
+
+                "endpoint":
+                    "/v1/predict",
+            },
+        )
+
 
         raise HTTPException(
 
@@ -428,6 +725,23 @@ def predict(
 
 
     except ModelContractError as error:
+
+        logger.warning(
+            "prediction.contract_error",
+            extra={
+                "request_id":
+                    request_id,
+
+                "endpoint":
+                    "/v1/predict",
+
+                "error":
+                    str(
+                        error
+                    ),
+            },
+        )
+
 
         raise HTTPException(
 
@@ -445,8 +759,14 @@ def predict(
     except Exception as error:
 
         logger.exception(
-            "Prediction failed. request_id=%s",
-            request_id,
+            "prediction.failed",
+            extra={
+                "request_id":
+                    request_id,
+
+                "endpoint":
+                    "/v1/predict",
+            },
         )
 
 
@@ -463,6 +783,10 @@ def predict(
         ) from error
 
 
+    # =====================================================
+    # LATENCY
+    # =====================================================
+
     latency_ms = (
 
         (
@@ -474,36 +798,83 @@ def predict(
     )
 
 
-    metadata = (
-        model_service.metadata()
-    )
+    # -----------------------------------------------------
+    # Echo correlation ID back to the caller.
+    # -----------------------------------------------------
 
-
-    # Echo the request ID in the HTTP response header too.
     response.headers[
         "X-Request-ID"
     ] = request_id
 
 
+    # =====================================================
+    # STRUCTURED PREDICTION LOG
+    #
+    # Docker stdout
+    #       +
+    # OTel Collector
+    #       ↓
+    # Loki
+    #       ↓
+    # Grafana
+    # =====================================================
+
     logger.info(
-        "prediction request_id=%s "
-        "prediction=%s "
-        "failure_probability=%.6f "
-        "version=%s "
-        "latency_ms=%.3f",
-        request_id,
-        result[
-            "prediction"
-        ],
-        result[
-            "failure_probability"
-        ],
-        metadata[
-            "model_version"
-        ],
-        latency_ms,
+        "prediction.completed",
+        extra={
+            "request_id":
+                request_id,
+
+            "endpoint":
+                "/v1/predict",
+
+            "prediction":
+                result[
+                    "prediction"
+                ],
+
+            "prediction_code":
+                result[
+                    "prediction_code"
+                ],
+
+            "failure_probability":
+                result[
+                    "failure_probability"
+                ],
+
+            "model_name":
+                metadata[
+                    "model_name"
+                ],
+
+            "model_version":
+                metadata[
+                    "model_version"
+                ],
+
+            "model_alias":
+                metadata[
+                    "model_alias"
+                ],
+
+            "failure_threshold":
+                metadata[
+                    "failure_threshold"
+                ],
+
+            "latency_ms":
+                round(
+                    latency_ms,
+                    3,
+                ),
+        },
     )
 
+
+    # =====================================================
+    # API RESPONSE
+    # =====================================================
 
     return PredictionResponse(
 
@@ -570,18 +941,19 @@ def predict(
         ),
     )
 
+
 # =========================================================
-# 9. BATCH PREDICTION
+# 12. BATCH PREDICTION
 #
 # Useful for:
 #
-# - replay
-# - backfill
-# - QA
-# - small offline batches
+#   replay
+#   backfill
+#   QA
+#   small offline batches
 #
-# This is NOT intended to replace large-scale Spark/batch
-# inference.
+# This endpoint is NOT intended to replace large-scale
+# distributed batch inference.
 # =========================================================
 
 @app.post(
@@ -599,24 +971,14 @@ def predict_batch(
 
     payload: BatchPredictionRequest,
 
-    x_request_id: Annotated[
-        str | None,
-        Header(
-            alias="X-Request-ID"
-        ),
-    ] = None,
+    request: Request,
+
+    response: Response,
 
 ) -> BatchPredictionResponse:
 
     request_id = (
-
-        x_request_id
-
-        or
-
-        str(
-            uuid4()
-        )
+        request.state.request_id
     )
 
 
@@ -627,6 +989,11 @@ def predict_batch(
 
     try:
 
+        # -------------------------------------------------
+        # Convert validated Pydantic objects into normal
+        # Python dictionaries.
+        # -------------------------------------------------
+
         records = [
 
             transaction.model_dump()
@@ -636,15 +1003,143 @@ def predict_batch(
         ]
 
 
-        results = (
-            model_service
-            .predict_records(
-                records
-            )
+        metadata = (
+            model_service.metadata()
         )
 
 
+        # =================================================
+        # BATCH TRACE
+        #
+        # We record batch size, not individual request
+        # payloads.
+        # =================================================
+
+        with mlflow.start_span(
+            name="payflow.predict_batch"
+        ) as span:
+
+            span.set_inputs(
+                {
+                    "request_id":
+                        request_id,
+
+                    "transaction_count":
+                        len(
+                            records
+                        ),
+                }
+            )
+
+
+            span.set_attributes(
+                {
+                    "service.name":
+                        "payflow-fastapi",
+
+                    "payflow.request_id":
+                        request_id,
+
+                    "mlflow.model.name":
+                        str(
+                            metadata[
+                                "model_name"
+                            ]
+                        ),
+
+                    "mlflow.model.version":
+                        str(
+                            metadata[
+                                "model_version"
+                            ]
+                        ),
+
+                    "mlflow.model.alias":
+                        str(
+                            metadata[
+                                "model_alias"
+                            ]
+                        ),
+
+                    "payflow.failure_threshold":
+                        float(
+                            metadata[
+                                "failure_threshold"
+                            ]
+                        ),
+
+                    "payflow.batch_size":
+                        len(
+                            records
+                        ),
+                }
+            )
+
+
+            results = (
+                model_service
+                .predict_records(
+                    records
+                )
+            )
+
+
+            failed_count = sum(
+
+                1
+
+                for result
+                in results
+
+                if result[
+                    "prediction"
+                ]
+                == "FAILED"
+            )
+
+
+            success_count = (
+
+                len(
+                    results
+                )
+
+                - failed_count
+            )
+
+
+            span.set_outputs(
+                {
+                    "request_id":
+                        request_id,
+
+                    "prediction_count":
+                        len(
+                            results
+                        ),
+
+                    "failed_count":
+                        failed_count,
+
+                    "success_count":
+                        success_count,
+                }
+            )
+
+
     except ModelNotReadyError as error:
+
+        logger.warning(
+            "batch_prediction.model_not_ready",
+            extra={
+                "request_id":
+                    request_id,
+
+                "endpoint":
+                    "/v1/predict/batch",
+            },
+        )
+
 
         raise HTTPException(
 
@@ -660,6 +1155,23 @@ def predict_batch(
 
 
     except ModelContractError as error:
+
+        logger.warning(
+            "batch_prediction.contract_error",
+            extra={
+                "request_id":
+                    request_id,
+
+                "endpoint":
+                    "/v1/predict/batch",
+
+                "error":
+                    str(
+                        error
+                    ),
+            },
+        )
+
 
         raise HTTPException(
 
@@ -677,9 +1189,14 @@ def predict_batch(
     except Exception as error:
 
         logger.exception(
-            "Batch prediction failed. "
-            "request_id=%s",
-            request_id,
+            "batch_prediction.failed",
+            extra={
+                "request_id":
+                    request_id,
+
+                "endpoint":
+                    "/v1/predict/batch",
+            },
         )
 
 
@@ -696,6 +1213,10 @@ def predict_batch(
         ) from error
 
 
+    # =====================================================
+    # TOTAL BATCH LATENCY
+    # =====================================================
+
     total_latency_ms = (
 
         (
@@ -707,10 +1228,18 @@ def predict_batch(
     )
 
 
-    metadata = (
-        model_service.metadata()
-    )
+    # -----------------------------------------------------
+    # Return correlation ID to caller.
+    # -----------------------------------------------------
 
+    response.headers[
+        "X-Request-ID"
+    ] = request_id
+
+
+    # =====================================================
+    # CONVERT MODEL RESULTS INTO API RESPONSES
+    # =====================================================
 
     prediction_responses = []
 
@@ -779,11 +1308,72 @@ def predict_batch(
                     ]
                 ),
 
-                # Batch-level timing is reported separately.
+                # -----------------------------------------
+                # Batch timing is returned at batch level,
+                # not duplicated as fake per-row latency.
+                # -----------------------------------------
+
                 latency_ms=0.0,
             )
         )
 
+
+    # =====================================================
+    # STRUCTURED BATCH LOG
+    # =====================================================
+
+    logger.info(
+        "batch_prediction.completed",
+        extra={
+            "request_id":
+                request_id,
+
+            "endpoint":
+                "/v1/predict/batch",
+
+            "transaction_count":
+                len(
+                    prediction_responses
+                ),
+
+            "failed_count":
+                failed_count,
+
+            "success_count":
+                success_count,
+
+            "model_name":
+                metadata[
+                    "model_name"
+                ],
+
+            "model_version":
+                metadata[
+                    "model_version"
+                ],
+
+            "model_alias":
+                metadata[
+                    "model_alias"
+                ],
+
+            "failure_threshold":
+                metadata[
+                    "failure_threshold"
+                ],
+
+            "latency_ms":
+                round(
+                    total_latency_ms,
+                    3,
+                ),
+        },
+    )
+
+
+    # =====================================================
+    # BATCH RESPONSE
+    # =====================================================
 
     return BatchPredictionResponse(
 

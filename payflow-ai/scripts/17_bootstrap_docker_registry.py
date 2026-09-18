@@ -260,6 +260,7 @@ print(
 trusted_types: list[str] | None = None
 
 
+assert source_model is not None
 classifier = (
     source_model
     .named_steps
